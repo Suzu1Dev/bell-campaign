@@ -1,0 +1,796 @@
+import {
+  CELL_STAGES,
+  PACING_META,
+  TEAM_COLORS,
+  type AutoScheduleInput,
+  type AutoSchedulePreview,
+  type CampaignSnapshot,
+  type CellStage,
+  type ProposedCellChange,
+  type ProposedNewTodo,
+  type TeamColor,
+  type WeekEventItem,
+} from "./types.js";
+
+const STAGE_PROGRESS_MAP: Record<CellStage, number> = {
+  待排: 0,
+  "進度25%": 25,
+  "進度50%": 50,
+  "進度75%": 75,
+  "進度100%": 100,
+  Debug: 92,
+  RC: 96,
+  活動: 100,
+  復盤: 100,
+};
+
+export function stageToPercent(stage: CellStage): number {
+  return STAGE_PROGRESS_MAP[stage] ?? 0;
+}
+
+export interface CampaignMetrics {
+  overallPercent: number;
+  completedTodos: number;
+  totalTodos: number;
+  conflictWeekCount: number;
+  teamProgress: Record<string, { percent: number; done: number; total: number; latestStage: CellStage }>;
+  weekProgress: Record<string, { percent: number; done: number; total: number; hasConflict: boolean }>;
+}
+
+export function computeCampaignMetrics(snapshot: Pick<CampaignSnapshot, "weeks" | "teams" | "cells" | "todos">): CampaignMetrics {
+  const cellMap = new Map<string, CellStage>();
+  for (const cell of snapshot.cells) {
+    cellMap.set(`${cell.weekId}:${cell.teamId}`, cell.stage);
+  }
+
+  const teamProgress: CampaignMetrics["teamProgress"] = {};
+  for (const team of snapshot.teams) {
+    const teamTodos = snapshot.todos.filter((t) => t.teamId === team.id);
+    const done = teamTodos.filter((t) => t.done).length;
+    const total = teamTodos.length;
+
+    let latestStage: CellStage = "待排";
+    let maxStageScore = 0;
+    for (const week of snapshot.weeks) {
+      const stage = cellMap.get(`${week.id}:${team.id}`);
+      if (stage && stage !== "待排") {
+        const s = stageToPercent(stage);
+        if (s >= maxStageScore) {
+          maxStageScore = s;
+          latestStage = stage;
+        }
+      }
+    }
+
+    const todoPct = total > 0 ? Math.round((done / total) * 100) : null;
+    const percent = todoPct !== null ? todoPct : maxStageScore;
+    teamProgress[team.id] = { percent, done, total, latestStage };
+  }
+
+  const weekProgress: CampaignMetrics["weekProgress"] = {};
+  const orderedWeeks = [...snapshot.weeks].sort((a, b) => a.orderIndex - b.orderIndex);
+  for (const week of orderedWeeks) {
+    const hasConflict = week.majorEvents.some((ev) => ev.kind === "conflict");
+    const weekTodos = snapshot.todos.filter((t) => t.weekId === week.id);
+    const done = weekTodos.filter((t) => t.done).length;
+    const total = weekTodos.length;
+
+    let percent = 0;
+    if (week.progressOverride !== null && Number.isFinite(week.progressOverride)) {
+      percent = Math.max(0, Math.min(100, Math.round(week.progressOverride)));
+    } else if (total > 0) {
+      percent = Math.round((done / total) * 100);
+    } else if (snapshot.teams.length > 0) {
+      const sum = snapshot.teams.reduce((acc, team) => {
+        const st = cellMap.get(`${week.id}:${team.id}`) ?? "待排";
+        return acc + stageToPercent(st);
+      }, 0);
+      percent = Math.round(sum / snapshot.teams.length);
+    }
+    weekProgress[week.id] = { percent, done, total, hasConflict };
+  }
+
+  const totalTodos = snapshot.todos.length;
+  const completedTodos = snapshot.todos.filter((t) => t.done).length;
+  const teamValues = Object.values(teamProgress);
+  const overallPercent =
+    totalTodos > 0
+      ? Math.round((completedTodos / totalTodos) * 100)
+      : teamValues.length > 0
+        ? Math.round(teamValues.reduce((acc, item) => acc + item.percent, 0) / teamValues.length)
+        : 0;
+
+  const conflictWeekCount = orderedWeeks.filter((w) => w.majorEvents.some((ev) => ev.kind === "conflict")).length;
+
+  return {
+    overallPercent,
+    completedTodos,
+    totalTodos,
+    conflictWeekCount,
+    teamProgress,
+    weekProgress,
+  };
+}
+
+/** RFC-4180 compliant CSV parser supporting multi-line quoted cells (Google Sheets export format). */
+export function parseCsvGrid(raw: string): string[][] {
+  const text = raw.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          cell += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cell += ch;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      row.push(cell.trim());
+      cell = "";
+    } else if (ch === "\n") {
+      row.push(cell.trim());
+      rows.push(row);
+      row = [];
+      cell = "";
+    } else {
+      cell += ch;
+    }
+  }
+  if (cell.length > 0 || row.length > 0) {
+    row.push(cell.trim());
+    rows.push(row);
+  }
+  return rows.filter((r) => r.some((c) => c.length > 0));
+}
+
+function normalizeStage(raw: string): CellStage {
+  const clean = raw.replace(/\s+/g, "");
+  if ((CELL_STAGES as readonly string[]).includes(clean)) return clean as CellStage;
+  if (/100%/.test(clean)) return "進度100%";
+  if (/75%/.test(clean)) return "進度75%";
+  if (/50%/.test(clean)) return "進度50%";
+  if (/25%/.test(clean)) return "進度25%";
+  if (/debug/i.test(clean)) return "Debug";
+  if (/^rc$/i.test(clean)) return "RC";
+  if (/活動/.test(clean)) return "活動";
+  if (/復盤|結案|檢討/.test(clean)) return "復盤";
+  return "待排";
+}
+
+function classifyEventKind(title: string): "milestone" | "conflict" {
+  return /撞期|coscup|conf|大選|連假|當兵|出國|停電|施工|撞/i.test(title) ? "conflict" : "milestone";
+}
+
+export interface ParsedGoogleSheetCampaign {
+  weeks: Array<{
+    monthLabel: string;
+    dateRange: string;
+    countdownLabel: string;
+    phase: "prep" | "event" | "post";
+    majorEvents: WeekEventItem[];
+    memo: string;
+    progressOverride: number | null;
+  }>;
+  teams: Array<{
+    name: string;
+    color: TeamColor;
+    cells: Array<{
+      weekIndex: number;
+      stage: CellStage;
+      weeklyFocus: string;
+      todos: string[];
+      crossTeam: string;
+    }>;
+  }>;
+}
+
+/**
+ * Parses the BELL Campaign / Google Sheets weekly countdown layout
+ * (matching the reference spreadsheet: 月, 日期, 倒數週數, 主要排程, 備註, 整體進度, and multi-row team blocks).
+ */
+export function parseGoogleSheetCsv(csvText: string): ParsedGoogleSheetCampaign {
+  const grid = parseCsvGrid(csvText);
+  if (grid.length < 3) {
+    throw new Error("試算表內容列數不足，請確認包含日期列與組別進度列。");
+  }
+
+  let monthRowIdx = -1;
+  let dateRowIdx = -1;
+  let countdownRowIdx = -1;
+  let majorEventRowIdx = -1;
+  let memoRowIdx = -1;
+  let overallRowIdx = -1;
+
+  for (let r = 0; r < Math.min(grid.length, 10); r++) {
+    const c0 = grid[r][0] ?? "";
+    const c1 = grid[r][1] ?? "";
+    const label = `${c0}${c1}`;
+    if (c1 === "月" || c0 === "月") monthRowIdx = r;
+    else if (label.includes("日期")) dateRowIdx = r;
+    else if (label.includes("倒數")) countdownRowIdx = r;
+    else if (label.includes("主要排程") || label.includes("重大事件") || label.includes("撞期")) majorEventRowIdx = r;
+    else if (label.includes("備註")) memoRowIdx = r;
+    else if (label.includes("整體進度") || label.includes("總進度")) overallRowIdx = r;
+  }
+
+  if (dateRowIdx < 0) dateRowIdx = 1;
+  const dateRow = grid[dateRowIdx] ?? [];
+  const startCol = 2;
+  const weekCols: number[] = [];
+  for (let c = startCol; c < dateRow.length; c++) {
+    if ((dateRow[c] ?? "").trim()) weekCols.push(c);
+  }
+  if (weekCols.length === 0) {
+    throw new Error("找不到每週日期欄位（例如 6/22~6/28），請檢查試算表格式。");
+  }
+
+  let runningMonth = "";
+  const weeks = weekCols.map((col, idx) => {
+    const rawMonth = monthRowIdx >= 0 ? (grid[monthRowIdx]?.[col] ?? "").trim() : "";
+    if (rawMonth) runningMonth = rawMonth;
+    const dateRange = (dateRow[col] ?? "").trim();
+    const countdownLabel =
+      countdownRowIdx >= 0 && (grid[countdownRowIdx]?.[col] ?? "").trim()
+        ? (grid[countdownRowIdx][col] ?? "").trim()
+        : `第 ${idx + 1} 週`;
+    const phase: "prep" | "event" | "post" = /活動後|會後|結案/.test(countdownLabel)
+      ? "post"
+      : /當周|當週|活動日/.test(countdownLabel)
+        ? "event"
+        : "prep";
+
+    const rawMajor = majorEventRowIdx >= 0 ? (grid[majorEventRowIdx]?.[col] ?? "").trim() : "";
+    const mergedEventLines: string[] = [];
+    if (rawMajor) {
+      const rawLines = rawMajor
+        .split(/\n+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      for (let i = 0; i < rawLines.length; i++) {
+        const cur = rawLines[i];
+        const next = rawLines[i + 1];
+        if (next && /^\d{1,2}\/\d{1,2}(?:~\d{1,2}\/\d{1,2})?$/.test(cur)) {
+          mergedEventLines.push(`${cur} ${next}`);
+          i += 1;
+        } else {
+          mergedEventLines.push(cur);
+        }
+      }
+    }
+    const majorEvents: WeekEventItem[] = mergedEventLines.map((line, evIdx) => ({
+      id: `ev-${idx}-${evIdx}`,
+      title: line,
+      kind: classifyEventKind(line),
+    }));
+
+    const memo = memoRowIdx >= 0 ? (grid[memoRowIdx]?.[col] ?? "").trim() : "";
+    let progressOverride: number | null = null;
+    if (overallRowIdx >= 0) {
+      const m = /(\d{1,3})\s*%/.exec(grid[overallRowIdx]?.[col] ?? "");
+      if (m) progressOverride = Math.min(100, Number(m[1]));
+    }
+
+    return {
+      monthLabel: runningMonth || "籌備期",
+      dateRange,
+      countdownLabel,
+      phase,
+      majorEvents,
+      memo,
+      progressOverride,
+    };
+  });
+
+  const headerEnd = Math.max(dateRowIdx, countdownRowIdx, majorEventRowIdx, memoRowIdx, overallRowIdx) + 1;
+  const teams: ParsedGoogleSheetCampaign["teams"] = [];
+  let currentTeam: ParsedGoogleSheetCampaign["teams"][number] | null = null;
+  let currentSubKind: "stage" | "focus" | "todo" | "cross" = "todo";
+
+  for (let r = headerEnd; r < grid.length; r++) {
+    const row = grid[r];
+    const teamCol = (row[0] ?? "").trim();
+    const subCol = (row[1] ?? "").trim();
+
+    if (teamCol && !["倒數週數", "主要排程", "備註", "整體進度"].includes(teamCol)) {
+      currentTeam = {
+        name: teamCol,
+        color: TEAM_COLORS[teams.length % TEAM_COLORS.length],
+        cells: weekCols.map((_, weekIndex) => ({
+          weekIndex,
+          stage: "待排",
+          weeklyFocus: "",
+          todos: [],
+          crossTeam: "",
+        })),
+      };
+      teams.push(currentTeam);
+    }
+
+    if (!currentTeam) continue;
+
+    if (subCol.includes("完成度") || subCol.includes("階段")) currentSubKind = "stage";
+    else if (subCol.includes("本週進度") || subCol.includes("本周進度") || subCol.includes("重點")) currentSubKind = "focus";
+    else if (subCol.includes("待辦")) currentSubKind = "todo";
+    else if (subCol.includes("跨部")) currentSubKind = "cross";
+
+    weekCols.forEach((col, weekIndex) => {
+      const val = (row[col] ?? "").trim();
+      if (!val) return;
+      const target = currentTeam!.cells[weekIndex];
+      if (currentSubKind === "stage") {
+        target.stage = normalizeStage(val);
+      } else if (currentSubKind === "focus") {
+        target.weeklyFocus = target.weeklyFocus ? `${target.weeklyFocus} · ${val}` : val;
+      } else if (currentSubKind === "todo") {
+        for (const item of val.split(/\n+/).map((s) => s.trim()).filter(Boolean)) {
+          target.todos.push(item);
+        }
+      } else if (currentSubKind === "cross") {
+        target.crossTeam = target.crossTeam ? `${target.crossTeam} ／ ${val}` : val;
+      }
+    });
+  }
+
+  return { weeks, teams };
+}
+
+/** Builds a 2D matrix aligned with the Google Sheets layout for 1-click TSV copy & CSV export. */
+export function buildGoogleSheetMatrix(snapshot: CampaignSnapshot): string[][] {
+  const orderedWeeks = [...snapshot.weeks].sort((a, b) => a.orderIndex - b.orderIndex);
+  const orderedTeams = [...snapshot.teams].sort((a, b) => a.orderIndex - b.orderIndex);
+  const metrics = computeCampaignMetrics(snapshot);
+  const cellMap = new Map(snapshot.cells.map((c) => [`${c.weekId}:${c.teamId}`, c]));
+
+  let lastMonth = "";
+  const monthRow = [
+    "",
+    "月",
+    ...orderedWeeks.map((w) => {
+      if (w.monthLabel !== lastMonth) {
+        lastMonth = w.monthLabel;
+        return w.monthLabel;
+      }
+      return "";
+    }),
+  ];
+  const dateRow = ["", "日期", ...orderedWeeks.map((w) => w.dateRange)];
+  const countdownRow = ["倒數週數", "", ...orderedWeeks.map((w) => w.countdownLabel)];
+  const progressRow = [
+    "整體進度",
+    `總計 ${metrics.overallPercent}%`,
+    ...orderedWeeks.map((w) => `${metrics.weekProgress[w.id]?.percent ?? 0}%`),
+  ];
+  const majorRow = [
+    "主要排程／撞期",
+    "",
+    ...orderedWeeks.map((w) =>
+      w.majorEvents.map((e) => (e.kind === "conflict" ? `[撞期避開] ${e.title}` : e.title)).join("\n"),
+    ),
+  ];
+  const memoRow = ["備註", "", ...orderedWeeks.map((w) => w.memo)];
+
+  const rows: string[][] = [monthRow, dateRow, countdownRow, progressRow, majorRow, memoRow];
+
+  for (const team of orderedTeams) {
+    rows.push([
+      team.name,
+      "完成度",
+      ...orderedWeeks.map((w) => cellMap.get(`${w.id}:${team.id}`)?.stage ?? "待排"),
+    ]);
+    rows.push([
+      "",
+      "本週進度",
+      ...orderedWeeks.map((w) => cellMap.get(`${w.id}:${team.id}`)?.weeklyFocus ?? ""),
+    ]);
+    rows.push([
+      "",
+      "待辦事項",
+      ...orderedWeeks.map((w) =>
+        snapshot.todos
+          .filter((t) => t.teamId === team.id && t.weekId === w.id)
+          .map((t) => `${t.done ? "✓" : "☐"} ${t.title}`)
+          .join("\n"),
+      ),
+    ]);
+    rows.push([
+      "",
+      "跨部合作",
+      ...orderedWeeks.map((w) => cellMap.get(`${w.id}:${team.id}`)?.crossTeam ?? ""),
+    ]);
+  }
+
+  return rows;
+}
+
+export function matrixToTsv(matrix: string[][]): string {
+  return matrix
+    .map((row) =>
+      row
+        .map((cell) => {
+          if (/[\t\n"]/.test(cell)) return `"${cell.replace(/"/g, '""')}"`;
+          return cell;
+        })
+        .join("\t"),
+    )
+    .join("\n");
+}
+
+export function matrixToCsvBom(matrix: string[][]): string {
+  const body = matrix
+    .map((row) =>
+      row
+        .map((cell) => {
+          if (/[,\n"]/.test(cell)) return `"${cell.replace(/"/g, '""')}"`;
+          return cell;
+        })
+        .join(","),
+    )
+    .join("\r\n");
+  return `\uFEFF${body}`;
+}
+
+export function buildWeeklyDigestText(snapshot: CampaignSnapshot): string {
+  const metrics = computeCampaignMetrics(snapshot);
+  const orderedWeeks = [...snapshot.weeks].sort((a, b) => a.orderIndex - b.orderIndex);
+  const orderedTeams = [...snapshot.teams].sort((a, b) => a.orderIndex - b.orderIndex);
+  const activeWeek =
+    orderedWeeks.find((w) => (metrics.weekProgress[w.id]?.percent ?? 0) < 100 && w.phase === "prep") ??
+    orderedWeeks[0];
+
+  const lines: string[] = [
+    `【${snapshot.campaign.name} · 時程協作週報】`,
+    `活動日期：${snapshot.campaign.eventDate} ｜ 整體完成度：${metrics.overallPercent}%（${metrics.completedTodos}/${metrics.totalTodos} 項待辦）`,
+  ];
+
+  if (activeWeek) {
+    lines.push(`當前焦點週次：${activeWeek.countdownLabel}（${activeWeek.dateRange}）`);
+    if (activeWeek.majorEvents.length > 0) {
+      lines.push(
+        `本週重要事件／撞期提醒：${activeWeek.majorEvents
+          .map((e) => (e.kind === "conflict" ? `⚠️ ${e.title}` : `📌 ${e.title}`))
+          .join("、")}`,
+      );
+    }
+  }
+
+  lines.push("", "▸ 各組進度與待辦重點：");
+  for (const team of orderedTeams) {
+    const tp = metrics.teamProgress[team.id];
+    const openTodos = snapshot.todos.filter((t) => t.teamId === team.id && !t.done).slice(0, 3);
+    const cell = activeWeek
+      ? snapshot.cells.find((c) => c.weekId === activeWeek.id && c.teamId === team.id)
+      : undefined;
+    lines.push(
+      `• ${team.name}（${tp?.percent ?? 0}% · ${cell?.stage ?? tp?.latestStage ?? "推進中"}）${
+        cell?.weeklyFocus ? `：${cell.weeklyFocus}` : ""
+      }`,
+    );
+    if (openTodos.length > 0) {
+      lines.push(`  待完成：${openTodos.map((t) => t.title).join(" ／ ")}`);
+    }
+  }
+
+  if (snapshot.campaign.sheetUrl) {
+    lines.push("", `Google 試算表完整時程：${snapshot.campaign.sheetUrl}`);
+  }
+  return lines.join("\n");
+}
+
+export function buildAppsScriptSyncCode(snapshot: CampaignSnapshot): string {
+  const matrixJson = JSON.stringify(buildGoogleSheetMatrix(snapshot));
+  return `/**
+ * BELL Campaign → Google 試算表 & Google 簡報 一鍵寫入腳本
+ * 使用方式：開啟目標 Google 試算表 →「擴充功能」→「Apps Script」貼上執行 syncBellCampaign()
+ */
+function syncBellCampaign() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheetName = ${JSON.stringify(snapshot.campaign.name.slice(0, 28))};
+  let sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
+  sheet.clear();
+
+  const rows = ${matrixJson};
+  sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+  sheet.setFrozenRows(4);
+  sheet.setFrozenColumns(2);
+  sheet.getRange(1, 1, 4, rows[0].length).setFontWeight("bold").setBackground("#F2F3F6");
+  sheet.autoResizeColumns(1, rows[0].length);
+}`;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Generates a crisp, self-contained offline-capable HTML share page & slide briefing for teammates. */
+export function buildStandaloneShareHtml(snapshot: CampaignSnapshot): string {
+  const metrics = computeCampaignMetrics(snapshot);
+  const orderedWeeks = [...snapshot.weeks].sort((a, b) => a.orderIndex - b.orderIndex);
+  const orderedTeams = [...snapshot.teams].sort((a, b) => a.orderIndex - b.orderIndex);
+  const cellMap = new Map(snapshot.cells.map((c) => [`${c.weekId}:${c.teamId}`, c]));
+
+  const headerCols = orderedWeeks
+    .map((w) => {
+      const wp = metrics.weekProgress[w.id];
+      const conflicts = w.majorEvents
+        .map(
+          (e) =>
+            `<span class="badge ${e.kind === "conflict" ? "conflict" : "milestone"}">${escapeHtml(e.title)}</span>`,
+        )
+        .join("");
+      return `<th>
+        <div class="month">${escapeHtml(w.monthLabel)} · ${escapeHtml(w.dateRange)}</div>
+        <div class="cd">${escapeHtml(w.countdownLabel)}</div>
+        <div class="pct">${wp?.percent ?? 0}%</div>
+        <div class="events">${conflicts}</div>
+      </th>`;
+    })
+    .join("");
+
+  const bodyRows = orderedTeams
+    .map((team) => {
+      const tp = metrics.teamProgress[team.id];
+      const tds = orderedWeeks
+        .map((w) => {
+          const cell = cellMap.get(`${w.id}:${team.id}`);
+          const todos = snapshot.todos.filter((t) => t.teamId === team.id && t.weekId === w.id);
+          return `<td>
+            <div class="stage">${escapeHtml(cell?.stage ?? "待排")}</div>
+            ${cell?.weeklyFocus ? `<div class="focus">${escapeHtml(cell.weeklyFocus)}</div>` : ""}
+            ${
+              todos.length
+                ? `<ul class="todos">${todos
+                    .map((t) => `<li class="${t.done ? "done" : ""}">${t.done ? "✓" : "○"} ${escapeHtml(t.title)}</li>`)
+                    .join("")}</ul>`
+                : ""
+            }
+            ${cell?.crossTeam ? `<div class="cross">跨部：${escapeHtml(cell.crossTeam)}</div>` : ""}
+          </td>`;
+        })
+        .join("");
+      return `<tr>
+        <td class="team-col">
+          <strong>${escapeHtml(team.name)}</strong>
+          <span>組長：${escapeHtml(team.lead || "待定")} · ${tp?.percent ?? 0}%</span>
+        </td>
+        ${tds}
+      </tr>`;
+    })
+    .join("");
+
+  return `<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>${escapeHtml(snapshot.campaign.name)} · BELL Campaign 時程分享</title>
+<style>
+  body { margin: 0; padding: 28px; font-family: "PingFang TC", "Noto Sans TC", system-ui, sans-serif; background: #F8F9FB; color: #111317; }
+  header { max-width: 1360px; margin: 0 auto 20px; display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 22px; }
+  .meta { color: #636872; font-size: 13px; margin-top: 4px; }
+  .kpi { background: #FFFFFF; border: 1px solid rgba(15,17,21,.1); border-radius: 8px; padding: 10px 16px; font-size: 13px; }
+  .wrap { max-width: 1360px; margin: 0 auto; overflow-x: auto; background: #FFFFFF; border: 1px solid rgba(15,17,21,.1); border-radius: 10px; }
+  table { border-collapse: collapse; width: 100%; min-width: 920px; font-size: 13px; }
+  th, td { border-bottom: 1px solid rgba(15,17,21,.08); border-right: 1px solid rgba(15,17,21,.08); padding: 10px 12px; vertical-align: top; text-align: left; }
+  th { background: #F2F3F6; min-width: 165px; }
+  .team-col { position: sticky; left: 0; background: #FFFFFF; min-width: 150px; z-index: 1; }
+  .team-col span { display: block; color: #636872; font-size: 12px; margin-top: 4px; }
+  .month { font-size: 12px; color: #636872; font-weight: 500; }
+  .cd { font-size: 14px; font-weight: 600; margin-top: 2px; }
+  .pct { font-size: 12px; color: #9E2B5C; margin-top: 2px; }
+  .badge { display: inline-block; margin-top: 4px; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
+  .badge.conflict { background: #FAF1E1; color: #8A5200; }
+  .badge.milestone { background: #F9ECF1; color: #9E2B5C; }
+  .stage { font-weight: 600; color: #9E2B5C; font-size: 12px; margin-bottom: 4px; }
+  .focus { font-weight: 500; margin-bottom: 6px; }
+  .todos { margin: 0; padding: 0; list-style: none; color: #3B3F46; }
+  .todos li { margin-bottom: 3px; }
+  .todos li.done { color: #636872; text-decoration: line-through; }
+  .cross { margin-top: 6px; padding-top: 4px; border-top: 1px dashed rgba(15,17,21,.12); font-size: 12px; color: #5640D8; }
+</style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>${escapeHtml(snapshot.campaign.name)}</h1>
+      <div class="meta">${escapeHtml(snapshot.campaign.subtitle)} · 活動日 ${escapeHtml(snapshot.campaign.eventDate)}</div>
+    </div>
+    <div class="kpi">整體進度 <strong>${metrics.overallPercent}%</strong> · 已完成 ${metrics.completedTodos}/${metrics.totalTodos} 待辦</div>
+  </header>
+  <div class="wrap">
+    <table>
+      <thead><tr><th class="team-col">組別 ／ 週次</th>${headerCols}</tr></thead>
+      <tbody>${bodyRows}</tbody>
+    </table>
+  </div>
+</body>
+</html>`;
+}
+
+/**
+ * Deterministic pacing scheduler: distributes parsed tasks & team stages across countdown weeks,
+ * avoiding heavy launches in weeks flagged with external clashing events (`conflict`) and respecting
+ * the chosen `PacingLevel` ("neither too loose nor too tight" at `balanced`).
+ */
+export function buildPacingSchedulePreview(
+  snapshot: Pick<CampaignSnapshot, "weeks" | "teams" | "cells" | "todos">,
+  input: AutoScheduleInput,
+): AutoSchedulePreview {
+  const meta = PACING_META.find((p) => p.id === input.pacing) ?? PACING_META[2];
+  const orderedWeeks = [...snapshot.weeks].sort((a, b) => a.orderIndex - b.orderIndex);
+  const prepWeeks = orderedWeeks.filter((w) => w.phase === "prep");
+  const eventWeek = orderedWeeks.find((w) => w.phase === "event");
+  const postWeeks = orderedWeeks.filter((w) => w.phase === "post");
+
+  const rawLines = input.tasksText
+    .split(/\n+/)
+    .map((line) => line.replace(/^[-*•\d.)\s]+/, "").trim())
+    .filter(Boolean);
+
+  const avoidedConflictWeeks = orderedWeeks
+    .filter((w) => w.majorEvents.some((ev) => ev.kind === "conflict"))
+    .map((w) => `${w.countdownLabel}（${w.dateRange}）`);
+
+  const usablePrep = prepWeeks.length > 0 ? prepWeeks : orderedWeeks.slice(0, Math.max(1, orderedWeeks.length - 1));
+  const activeCutoff = Math.max(1, usablePrep.length - meta.bufferWeeks);
+
+  // Compute slot capacity weights per prep week: conflict weeks drop capacity to 35% so tasks steer clear
+  const slotWeights = usablePrep.map((w, idx) => {
+    const hasConflict = w.majorEvents.some((ev) => ev.kind === "conflict");
+    const inBuffer = idx >= activeCutoff;
+    let weight = 1.0 * meta.factor;
+    if (inBuffer) weight *= 0.45;
+    if (hasConflict) weight *= 0.35;
+    // Balanced / Compact front-loads middle-early weeks smoothly instead of piling up at week -1
+    const posRatio = usablePrep.length > 1 ? idx / (usablePrep.length - 1) : 0.5;
+    if (input.pacing === "compact" || input.pacing === "intense") {
+      weight *= 1.15 - posRatio * 0.35;
+    } else if (input.pacing === "relaxed") {
+      weight *= 0.85 + Math.sin(posRatio * Math.PI) * 0.25;
+    } else {
+      weight *= 0.92 + Math.sin(posRatio * Math.PI) * 0.28;
+    }
+    return { week: w, weight: Math.max(0.2, weight), hasConflict, assigned: 0 };
+  });
+
+  const todos: ProposedNewTodo[] = [];
+  const teams = snapshot.teams;
+
+  if (teams.length > 0) {
+    rawLines.forEach((line, idx) => {
+      // Match "[組別] 任務" or keyword affinity, otherwise round-robin across teams
+      let matchedTeam = teams[idx % teams.length];
+      for (const t of teams) {
+        if (line.includes(t.name) || (t.name.includes("行銷") && /社群|貼文|宣傳|視覺|設計/.test(line)) || (t.name.includes("場務") && /場地|報到|器材|動線|便當|志工/.test(line)) || ((t.name.includes("講者") || t.name.includes("Panel") || t.name.includes("咖啡")) && /講者|信件|題綱|主持|簡報|名單/.test(line))) {
+          matchedTeam = t;
+          break;
+        }
+      }
+      const cleanTitle = line.replace(new RegExp(`^\\[?${matchedTeam.name}\\]?[:：\\s-]*`), "").trim() || line;
+
+      // Pick the prep week with highest remaining capacity ratio
+      let bestSlot = slotWeights[0];
+      let bestScore = -Infinity;
+      for (const slot of slotWeights) {
+        const loadPenalty = slot.assigned / Math.max(1, meta.maxTasksPerTeamWeek * Math.max(1, teams.length / 2));
+        const candidateScore = slot.weight - loadPenalty;
+        if (candidateScore > bestScore) {
+          bestScore = candidateScore;
+          bestSlot = slot;
+        }
+      }
+      bestSlot.assigned += 1;
+
+      todos.push({
+        teamId: matchedTeam.id,
+        weekId: bestSlot.week.id,
+        title: cleanTitle,
+        priority: /確認|死線|寄出|定案|收齊/.test(cleanTitle) ? "high" : "normal",
+      });
+    });
+  }
+
+  const cells: ProposedCellChange[] = [];
+  for (const team of teams) {
+    usablePrep.forEach((week, idx) => {
+      const ratio = usablePrep.length > 1 ? (idx + 1) / usablePrep.length : 1;
+      const inBuffer = idx >= activeCutoff;
+      let stage: CellStage = "進度25%";
+      if (inBuffer) {
+        stage = idx === usablePrep.length - 1 && meta.bufferWeeks >= 1 ? "RC" : "Debug";
+      } else if (ratio <= 0.3) {
+        stage = "進度25%";
+      } else if (ratio <= 0.58) {
+        stage = "進度50%";
+      } else if (ratio <= 0.82) {
+        stage = "進度75%";
+      } else {
+        stage = "進度100%";
+      }
+
+      const weekTeamTodos = todos.filter((t) => t.teamId === team.id && t.weekId === week.id);
+      const monthGoal = input.monthlyGoals.find((g) => week.monthLabel.includes(g.month) || g.month.includes(week.monthLabel));
+      const focus =
+        weekTeamTodos.length > 0
+          ? weekTeamTodos.map((t) => t.title.slice(0, 14)).slice(0, 2).join(" · ")
+          : inBuffer
+            ? stage === "RC"
+              ? "總彩排驗收與最終確認"
+              : "跨組流程除錯與備案檢核"
+            : monthGoal?.goal
+              ? `${monthGoal.goal.slice(0, 16)}`
+              : "依排程推進組內交付";
+
+      cells.push({
+        weekId: week.id,
+        teamId: team.id,
+        stage,
+        weeklyFocus: focus,
+      });
+    });
+
+    if (eventWeek) {
+      cells.push({
+        weekId: eventWeek.id,
+        teamId: team.id,
+        stage: "活動",
+        weeklyFocus: "活動當日執行與現場應變",
+      });
+    }
+    postWeeks.forEach((pw, pIdx) => {
+      cells.push({
+        weekId: pw.id,
+        teamId: team.id,
+        stage: "復盤",
+        weeklyFocus: pIdx === 0 ? "成果歸檔、感謝信與核銷整理" : "專案復盤檢討與文件交接",
+      });
+    });
+  }
+
+  const weeklyLoadScores = orderedWeeks.map((w) => {
+    const hasConflict = w.majorEvents.some((ev) => ev.kind === "conflict");
+    const existingCount = snapshot.todos.filter((t) => t.weekId === w.id && !t.done).length;
+    const addedCount = todos.filter((t) => t.weekId === w.id).length;
+    const rawLoad = w.phase === "event" ? 82 : w.phase === "post" ? 38 : Math.min(95, 22 + (existingCount + addedCount) * 14);
+    const score = hasConflict && w.phase === "prep" ? Math.min(52, rawLoad) : rawLoad;
+    return {
+      weekId: w.id,
+      label: w.countdownLabel,
+      score,
+      hasConflict,
+    };
+  });
+
+  const conflictNote =
+    avoidedConflictWeeks.length > 0
+      ? `已自動避開 ${avoidedConflictWeeks.join("、")} 的大型撞期時段，將重頭交付前移或分流；`
+      : "";
+
+  return {
+    pacing: input.pacing,
+    rationale: `採用「${meta.label}」節奏規劃：${conflictNote}${
+      meta.bufferWeeks > 0 ? `並在活動前預留 ${meta.bufferWeeks} 週 Debug／RC 驗收緩衝` : "全週期高密度推進"
+    }，共分配 ${todos.length} 項關鍵任務。`,
+    avoidedConflictWeeks,
+    cells,
+    todos,
+    weeklyLoadScores,
+  };
+}
