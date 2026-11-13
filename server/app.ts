@@ -3,6 +3,7 @@ import compression from "compression";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import {
   AI_PROVIDERS,
@@ -161,9 +162,13 @@ const createCampaignSchema = z
   .object({
     name: z.string().trim().min(1).max(80),
     subtitle: z.string().trim().max(120).optional(),
-    brief: z.string().trim().max(500).optional(),
+    brief: z.string().trim().max(1000).optional(),
     eventDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    postWeeks: z.number().int().min(0).max(4).optional(),
+    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    prepWeeks: z.number().int().min(1).max(52).optional(),
+    postWeeks: z.number().int().min(0).max(8).optional(),
+    dateTentative: z.boolean().optional(),
+    tentativeNote: z.string().trim().max(80).optional(),
   })
   .strict();
 
@@ -173,6 +178,8 @@ const patchCampaignSchema = z
     subtitle: z.string().trim().max(140).optional(),
     brief: z.string().max(1000).optional(),
     eventDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    dateTentative: z.boolean().optional(),
+    tentativeNote: z.string().trim().max(80).optional(),
     pacing: z.enum(PACING_LEVELS).optional(),
     mainGoal: z.string().max(1000).optional(),
     monthlyGoals: z
@@ -181,6 +188,17 @@ const patchCampaignSchema = z
       .optional(),
     sheetUrl: z.string().max(500).optional(),
     slidesUrl: z.string().max(500).optional(),
+  })
+  .strict();
+
+const rescheduleTimelineSchema = z
+  .object({
+    eventDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    prepWeeks: z.number().int().min(1).max(52).optional(),
+    postWeeks: z.number().int().min(0).max(8).optional(),
+    dateTentative: z.boolean().optional(),
+    tentativeNote: z.string().trim().max(80).optional(),
   })
   .strict();
 
@@ -482,7 +500,7 @@ export function createApp(options: CreateAppOptions) {
     aiRunner,
     sheetCsvFetcher = defaultSheetCsvFetcher,
     docFetcher = defaultDocFetcher,
-    distDir = resolve(process.cwd(), "dist"),
+    distDir = fileURLToPath(new URL("../dist", import.meta.url)),
   } = options;
 
   const app = express();
@@ -497,6 +515,10 @@ export function createApp(options: CreateAppOptions) {
   });
 
   // ── BELL Suite Contract Endpoints ────────────────────────────────────────
+  app.get("/api/health", (_req, res) => {
+    res.json({ status: "ok", appId: "campaign" });
+  });
+
   app.get("/api/suite/manifest", (_req, res) => {
     const manifest: SuiteManifest = {
       schemaVersion: 1,
@@ -507,7 +529,7 @@ export function createApp(options: CreateAppOptions) {
         {
           id: "campaign.draft",
           kind: "accept-handoff",
-          route: "#/handoff",
+          route: "#/tasks",
           accepts: ["text"],
           maxChars: SUITE_LIMITS.handoffText,
         },
@@ -592,6 +614,12 @@ export function createApp(options: CreateAppOptions) {
     if (!parsed.success) throw new AppError(400, "活動設定欄位格式不正確。");
     store.updateCampaignMeta(req.params.id, parsed.data);
     res.json(store.getSnapshot(req.params.id));
+  });
+
+  app.post("/api/campaigns/:id/timeline", (req, res) => {
+    const parsed = rescheduleTimelineSchema.safeParse(req.body);
+    if (!parsed.success) throw new AppError(400, "時程區間設定格式不正確（支援 1–52 週會前倒數）。");
+    res.json(store.rescheduleCampaignTimeline(req.params.id, parsed.data));
   });
 
   // ── Schedule Matrix & Google Sheet / Slides Interop ──────────────────────
@@ -1067,6 +1095,15 @@ export function createApp(options: CreateAppOptions) {
         brief: updatedSnap.campaign.brief,
         mainGoal: updatedSnap.campaign.mainGoal,
         teamNames: updatedSnap.teams.map((t) => t.name),
+      });
+    } else if (proposal.kind === "reschedule_timeline") {
+      store.rescheduleCampaignTimeline(campaignId, {
+        ...(typeof p.eventDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(p.eventDate) ? { eventDate: p.eventDate } : {}),
+        ...(typeof p.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(p.startDate) ? { startDate: p.startDate } : {}),
+        ...(typeof p.prepWeeks === "number" ? { prepWeeks: Math.max(1, Math.min(52, Math.round(p.prepWeeks))) } : {}),
+        ...(typeof p.postWeeks === "number" ? { postWeeks: Math.max(0, Math.min(8, Math.round(p.postWeeks))) } : {}),
+        ...(typeof p.dateTentative === "boolean" ? { dateTentative: p.dateTentative } : {}),
+        ...(typeof p.tentativeNote === "string" ? { tentativeNote: p.tentativeNote } : {}),
       });
     } else if (proposal.kind === "add_partner") {
       const kind = (PARTNER_KINDS as readonly string[]).includes(String(p.kind))

@@ -131,6 +131,8 @@ export interface CampaignSummary {
   eventDate: string;
   startDate: string;
   postWeeks: number;
+  dateTentative: boolean;
+  tentativeNote: string;
   pacing: PacingLevel;
   updatedAt: string;
 }
@@ -303,6 +305,7 @@ export interface FormResponseItem {
 
 export type BotActionKind =
   | "setup_project_brief"
+  | "reschedule_timeline"
   | "adjust_pacing"
   | "auto_schedule"
   | "add_todo"

@@ -1,11 +1,30 @@
 {
   "name": "bell-campaign",
-  "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "description": "Local-first weekly countdown timeline, team progress, and event operations workspace — standalone or part of BELL Suite.",
+  "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Suzu1Dev/bell-campaign.git"
+  },
+  "homepage": "https://github.com/Suzu1Dev/bell-campaign#readme",
+  "bin": {
+    "bell-campaign": "./bin/bell-campaign.mjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "server",
+    "shared",
+    "LICENSE",
+    "README.md",
+    "README.zh-TW.md"
+  ],
   "scripts": {
     "dev": "concurrently -k -n api,web \"tsx watch --env-file-if-exists=.env server/index.ts\" \"vite --host 127.0.0.1\"",
     "build": "tsc --noEmit && vite build",
+    "prepack": "npm run build",
     "start": "tsx --env-file-if-exists=.env server/index.ts",
     "test": "BELL_LOG=off tsx --test --test-timeout=60000 server/*.test.ts shared/*.test.ts",
     "typecheck": "tsc --noEmit"
@@ -18,6 +37,7 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "tailwindcss": "^4.3.5",
+    "tsx": "^4.20.0",
     "zod": "^4.1.0"
   },
   "devDependencies": {
@@ -30,11 +50,10 @@
     "@vitejs/plugin-react": "^5.0.0",
     "cmdk": "1.1.1",
     "concurrently": "^9.2.0",
-    "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "vite": "^7.1.0"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=20"
   }
 }

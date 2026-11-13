@@ -3,6 +3,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   AlertTriangle,
   CalendarPlus,
+  CalendarRange,
   Check,
   CheckCircle2,
   ChevronLeft,
@@ -41,7 +42,9 @@ import {
   buildGoogleSheetMatrix,
   buildPacingSchedulePreview,
   buildWeeklyDigestText,
+  buildWeeklyTimelineDefs,
   computeCampaignMetrics,
+  formatCampaignDateLabel,
   matrixToTsv,
   stageToPercent,
 } from "../../shared/sheets";
@@ -79,10 +82,31 @@ export default function ScheduleView({
     [snapshot.cells],
   );
 
-  // Group contiguous month headers cleanly
+  // Group contiguous month epochs across the full timeline (supports multi-month & cross-year spans)
+  const monthEpochs = useMemo(() => {
+    const epochs: Array<{ id: string; label: string; weeks: CampaignWeek[] }> = [];
+    for (const w of orderedWeeks) {
+      const last = epochs[epochs.length - 1];
+      if (last && last.label === w.monthLabel) {
+        last.weeks.push(w);
+      } else {
+        epochs.push({ id: `${epochs.length}:${w.monthLabel}`, label: w.monthLabel, weeks: [w] });
+      }
+    }
+    return epochs;
+  }, [orderedWeeks]);
+
+  const [monthFilter, setMonthFilter] = useState<string>("all");
+  const activeEpoch = useMemo(
+    () => (monthFilter === "all" ? null : monthEpochs.find((e) => e.id === monthFilter) ?? null),
+    [monthEpochs, monthFilter],
+  );
+  const visibleWeeks = activeEpoch ? activeEpoch.weeks : orderedWeeks;
+
+  // Group contiguous month headers cleanly for currently visible weeks
   const monthSpans = useMemo(() => {
     const spans: Array<{ label: string; span: number }> = [];
-    for (const w of orderedWeeks) {
+    for (const w of visibleWeeks) {
       const last = spans[spans.length - 1];
       if (last && last.label === w.monthLabel) {
         last.span += 1;
@@ -91,12 +115,12 @@ export default function ScheduleView({
       }
     }
     return spans;
-  }, [orderedWeeks]);
+  }, [visibleWeeks]);
 
   // Unified top-level project progress runs (merging consecutive identical stages into one continuous line)
   const projectStageRuns = useMemo(() => {
     const runs: Array<{ stage: CellStage; weeks: CampaignWeek[] }> = [];
-    for (const w of orderedWeeks) {
+    for (const w of visibleWeeks) {
       const st = w.stage ?? "待排";
       const prev = runs[runs.length - 1];
       if (prev && prev.stage === st) {
@@ -106,10 +130,17 @@ export default function ScheduleView({
       }
     }
     return runs;
-  }, [orderedWeeks]);
+  }, [visibleWeeks]);
 
   // Dialog states
   const [aiOpen, setAiOpen] = useState(false);
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  const [tlStartDate, setTlStartDate] = useState(snapshot.campaign.startDate);
+  const [tlEventDate, setTlEventDate] = useState(snapshot.campaign.eventDate);
+  const [tlPostWeeks, setTlPostWeeks] = useState(snapshot.campaign.postWeeks);
+  const [tlTentative, setTlTentative] = useState(snapshot.campaign.dateTentative);
+  const [tlTentativeNote, setTlTentativeNote] = useState(snapshot.campaign.tentativeNote);
+  const [tlBusy, setTlBusy] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [shareTab, setShareTab] = useState<"sheets" | "slides" | "team">("sheets");
   const [slideIdx, setSlideIdx] = useState(0);
@@ -189,6 +220,71 @@ export default function ScheduleView({
   const [importBusy, setImportBusy] = useState(false);
 
   const currentPacingMeta = PACING_META.find((p) => p.id === snapshot.campaign.pacing) ?? PACING_META[2];
+
+  const timelinePreview = useMemo(
+    () =>
+      buildWeeklyTimelineDefs({
+        startDate: tlStartDate,
+        eventDate: tlEventDate,
+        postWeeks: tlPostWeeks,
+        dateTentative: tlTentative,
+      }),
+    [tlStartDate, tlEventDate, tlPostWeeks, tlTentative],
+  );
+
+  function openAiDialog() {
+    setPacing(snapshot.campaign.pacing);
+    setMainGoal(snapshot.campaign.mainGoal);
+    if (snapshot.campaign.monthlyGoals.length > 0) {
+      setMonthlyGoals(snapshot.campaign.monthlyGoals);
+    }
+    if (snapshot.todos.length > 0) {
+      const teamNameMap = new Map(snapshot.teams.map((t) => [t.id, t.name]));
+      setTasksText(
+        snapshot.todos
+          .filter((td) => !td.done)
+          .slice(0, 12)
+          .map((td) => `${teamNameMap.get(td.teamId) ?? "籌備組"}：${td.title}`)
+          .join("\n"),
+      );
+    }
+    setAiServerPreview(null);
+    setAiOpen(true);
+  }
+
+  function openTimelineDialog() {
+    setTlStartDate(snapshot.campaign.startDate);
+    setTlEventDate(snapshot.campaign.eventDate);
+    setTlPostWeeks(snapshot.campaign.postWeeks);
+    setTlTentative(snapshot.campaign.dateTentative);
+    setTlTentativeNote(snapshot.campaign.tentativeNote);
+    setTimelineOpen(true);
+  }
+
+  async function handleApplyTimeline() {
+    setTlBusy(true);
+    try {
+      const next = await apiWrite<CampaignSnapshot>(
+        `/api/campaigns/${snapshot.campaign.id}/timeline`,
+        "POST",
+        {
+          startDate: tlStartDate,
+          eventDate: tlEventDate,
+          postWeeks: tlPostWeeks,
+          dateTentative: tlTentative,
+          tentativeNote: tlTentative ? tlTentativeNote.trim() || "日期待定" : "",
+        },
+      );
+      onSnapshot(next);
+      setMonthFilter("all");
+      setTimelineOpen(false);
+      notify(`已更新籌備時程區間（會前倒數 ${timelinePreview.prepCount} 週，共 ${timelinePreview.weeks.length} 週）`);
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "更新時程區間失敗");
+    } finally {
+      setTlBusy(false);
+    }
+  }
 
   const daysUntilEvent = useMemo(() => {
     const target = Date.parse(`${snapshot.campaign.eventDate}T00:00:00Z`);
@@ -408,23 +504,49 @@ export default function ScheduleView({
           </div>
         </div>
 
-        <div className="kpi-card">
+        <div
+          className="kpi-card"
+          style={{ cursor: "pointer" }}
+          onClick={openTimelineDialog}
+          title="點擊調整籌備起算日、擴展長程倒數週數（1–52 週）或設定日期待定"
+        >
           <div className="kpi-head">
             <span>活動日期與週期</span>
-            <span className="tabular" style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>{snapshot.campaign.eventDate}</span>
+            {snapshot.campaign.dateTentative ? (
+              <span className="pill pill-warn" style={{ height: 20, fontSize: 11, padding: "0 7px" }}>
+                日期待定
+              </span>
+            ) : (
+              <span className="tabular" style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>
+                {snapshot.campaign.eventDate}
+              </span>
+            )}
           </div>
           <div className="kpi-value tabular">
             {orderedWeeks.length} 週{" "}
             <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text-3)" }}>
-              {daysUntilEvent !== null
-                ? daysUntilEvent >= 0
-                  ? `· 倒數 ${daysUntilEvent} 天`
-                  : `· 已舉辦（會後復盤）`
-                : ""}
+              {snapshot.campaign.dateTentative
+                ? `· 倒數 ${orderedWeeks.filter((w) => w.phase === "prep").length} 週起算`
+                : daysUntilEvent !== null
+                  ? daysUntilEvent >= 0
+                    ? `· 倒數 ${daysUntilEvent} 天`
+                    : `· 已舉辦（會後復盤）`
+                  : ""}
             </span>
           </div>
-          <div style={{ fontSize: 12.5, color: "var(--text-3)" }}>
-            含會前倒數至活動後 {orderedWeeks.filter((w) => w.phase === "post").length} 週結案
+          <div
+            style={{
+              fontSize: 12.5,
+              color: snapshot.campaign.dateTentative ? "var(--campaign-text)" : "var(--text-3)",
+              fontWeight: snapshot.campaign.dateTentative ? 500 : 400,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {snapshot.campaign.dateTentative
+              ? `${formatCampaignDateLabel(snapshot.campaign)} · 點擊調整週數 →`
+              : `倒數 ${orderedWeeks.filter((w) => w.phase === "prep").length} 週至會後 ${orderedWeeks.filter((w) => w.phase === "post").length} 週 · 點擊調整 →`}
           </div>
         </div>
 
@@ -445,11 +567,7 @@ export default function ScheduleView({
         <div
           className="kpi-card"
           style={{ cursor: "pointer" }}
-          onClick={() => {
-            setPacing(snapshot.campaign.pacing);
-            setMainGoal(snapshot.campaign.mainGoal);
-            setAiOpen(true);
-          }}
+          onClick={openAiDialog}
         >
           <div className="kpi-head">
             <span>排程緊湊度</span>
@@ -468,6 +586,11 @@ export default function ScheduleView({
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <strong style={{ fontSize: 14.5 }}>每週時程矩陣</strong>
             <span className="pill">{orderedTeams.length} 組別 × {orderedWeeks.length} 週</span>
+            {snapshot.campaign.dateTentative && (
+              <span className="pill pill-warn" title="正式日期確認後可隨時點擊「時程區間 · 週數」一鍵對齊">
+                {formatCampaignDateLabel(snapshot.campaign)}
+              </span>
+            )}
             {snapshot.campaign.sheetUrl && (
               <a
                 href={snapshot.campaign.sheetUrl}
@@ -484,6 +607,10 @@ export default function ScheduleView({
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" className="btn btn-sm" onClick={openTimelineDialog}>
+              <CalendarRange size={13} />
+              <span>時程區間 · 週數</span>
+            </button>
             <button type="button" className="btn btn-sm" onClick={() => setAddTeamOpen(true)}>
               <Users size={13} />
               <span>新增組別</span>
@@ -499,17 +626,45 @@ export default function ScheduleView({
             <button
               type="button"
               className="btn btn-primary btn-sm"
-              onClick={() => {
-                setPacing(snapshot.campaign.pacing);
-                setMainGoal(snapshot.campaign.mainGoal);
-                setAiOpen(true);
-              }}
+              onClick={openAiDialog}
             >
               <Sparkles size={13} />
               <span>AI 自動排程</span>
             </button>
           </div>
         </div>
+
+        {monthEpochs.length > 1 && (
+          <div className="month-filter-bar" role="tablist" aria-label="依月份篩選時程週次">
+            <span className="month-filter-caption">月份視角</span>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={!activeEpoch}
+              className={`month-chip ${!activeEpoch ? "is-active" : ""}`}
+              onClick={() => setMonthFilter("all")}
+            >
+              <span>全部週次</span>
+              <span className="month-chip-count tabular">{orderedWeeks.length}</span>
+            </button>
+            {monthEpochs.map((ep) => {
+              const isAct = activeEpoch?.id === ep.id;
+              return (
+                <button
+                  key={ep.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={isAct}
+                  className={`month-chip ${isAct ? "is-active" : ""}`}
+                  onClick={() => setMonthFilter(ep.id)}
+                >
+                  <span>{ep.label}</span>
+                  <span className="month-chip-count tabular">{ep.weeks.length}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         <div className="matrix-viewport">
           <table className="schedule-table">
@@ -587,7 +742,7 @@ export default function ScheduleView({
                     點擊週次記錄撞期活動或重要死線
                   </div>
                 </th>
-                {orderedWeeks.map((week) => {
+                {visibleWeeks.map((week) => {
                   const wp = metrics.weekProgress[week.id] ?? { percent: 0, done: 0, total: 0, hasConflict: false };
                   return (
                     <th
@@ -644,9 +799,9 @@ export default function ScheduleView({
                       </div>
                     </td>
 
-                    {orderedWeeks.map((week, wIdx) => {
+                    {visibleWeeks.map((week, wIdx) => {
                       const cell = cellMap.get(`${week.id}:${team.id}`);
-                      const prevWeek = wIdx > 0 ? orderedWeeks[wIdx - 1] : null;
+                      const prevWeek = wIdx > 0 ? visibleWeeks[wIdx - 1] : null;
                       const prevCell = prevWeek ? cellMap.get(`${prevWeek.id}:${team.id}`) : undefined;
 
                       const curFocus = (cell?.weeklyFocus ?? "").trim();
@@ -831,7 +986,7 @@ export default function ScheduleView({
                 <div>
                   <label className="field-label">階段延續週數（連續相同進度會自動合併成一條橫條）</label>
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    {[1, 2, 3, 4].map((n) => (
+                    {[1, 2, 3, 4, 6, 8].map((n) => (
                       <button
                         key={n}
                         type="button"
@@ -1036,7 +1191,11 @@ export default function ScheduleView({
                           style={{ height: `${Math.max(14, Math.round(item.score * 0.58))}px` }}
                         />
                         <span style={{ fontSize: 11, color: "var(--text-3)", whiteSpace: "nowrap" }}>
-                          {item.label.replace("倒數 ", "W-").replace(" 周", "").replace("活動當周", "D-Day").replace("活動後 ", "W+")}
+                          {item.label
+                            .replace("倒數 ", "W-")
+                            .replace(" 周", "")
+                            .replace(/暫定?活動當周/, "D-Day")
+                            .replace("活動後 ", "W+")}
                         </span>
                       </div>
                     ))}
@@ -1233,8 +1392,12 @@ export default function ScheduleView({
                         </div>
                         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
                           <div className="kpi-card">
-                            <span style={{ fontSize: 12, color: "var(--text-3)" }}>正式活動日</span>
-                            <strong className="tabular" style={{ fontSize: 18 }}>{snapshot.campaign.eventDate}</strong>
+                            <span style={{ fontSize: 12, color: "var(--text-3)" }}>
+                              {snapshot.campaign.dateTentative ? "預計舉辦時間" : "正式活動日"}
+                            </span>
+                            <strong className="tabular" style={{ fontSize: snapshot.campaign.dateTentative ? 15 : 18 }}>
+                              {formatCampaignDateLabel(snapshot.campaign)}
+                            </strong>
                           </div>
                           <div className="kpi-card">
                             <span style={{ fontSize: 12, color: "var(--text-3)" }}>整體完成度</span>
@@ -1533,6 +1696,144 @@ export default function ScheduleView({
                 >
                   <Plus size={14} />
                   <span>新增週次</span>
+                </button>
+              </div>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+      {/* ── Dialog 7: Long-Term Timeline & Tentative Date Configurator ── */}
+      <Dialog.Root open={timelineOpen} onOpenChange={setTimelineOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content" style={{ maxWidth: 520 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <Dialog.Title style={{ margin: 0, fontSize: 16.5, fontWeight: 700 }}>
+                    調整籌備時程區間與倒數週數
+                  </Dialog.Title>
+                  <Dialog.Description style={{ margin: "2px 0 0", fontSize: 12.5, color: "var(--text-3)" }}>
+                    支援 1–52 週跨月長程規劃與「日期待定」模式；變更時將自動保留現有待辦與紀錄
+                  </Dialog.Description>
+                </div>
+                <Dialog.Close asChild>
+                  <button type="button" className="icon-btn" aria-label="關閉">
+                    <X size={15} />
+                  </button>
+                </Dialog.Close>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <span className="field-label" style={{ marginBottom: 0 }}>舉辦日期狀態</span>
+                <div className="segmented-inline" role="radiogroup" aria-label="舉辦日期狀態">
+                  <button
+                    type="button"
+                    className={`seg-btn ${!tlTentative ? "is-active" : ""}`}
+                    onClick={() => setTlTentative(false)}
+                  >
+                    已確定正式日期
+                  </button>
+                  <button
+                    type="button"
+                    className={`seg-btn ${tlTentative ? "is-active" : ""}`}
+                    onClick={() => {
+                      setTlTentative(true);
+                      if (!tlTentativeNote.trim()) {
+                        const ym = tlEventDate.slice(0, 7).split("-");
+                        const m = Number(ym[1] || 2);
+                        setTlTentativeNote(`預計 ${ym[0]} 年 ${m}–${(m % 12) + 1} 月（日期待定）`);
+                      }
+                    }}
+                  >
+                    日期待定（先排月份）
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
+                    <label className="field-label" style={{ marginBottom: 0 }}>籌備起算日</label>
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      style={{ border: "none", padding: "0 4px", fontSize: 11.5, color: "var(--campaign-text)", cursor: "pointer" }}
+                      onClick={() => setTlStartDate(new Date().toISOString().slice(0, 10))}
+                    >
+                      設為今天
+                    </button>
+                  </div>
+                  <input
+                    type="date"
+                    className="input"
+                    value={tlStartDate}
+                    onChange={(e) => setTlStartDate(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="field-label">
+                    {tlTentative ? "暫定基準週期（展開週次用）" : "正式活動日期"}
+                  </label>
+                  <input
+                    type="date"
+                    className="input"
+                    value={tlEventDate}
+                    onChange={(e) => setTlEventDate(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              {tlTentative && (
+                <div>
+                  <label className="field-label">預計舉辦月份／區間標註（顯示於時程總表與週報）</label>
+                  <input
+                    className="input"
+                    value={tlTentativeNote}
+                    onChange={(e) => setTlTentativeNote(e.target.value)}
+                    placeholder="例如：預計 2027 年 2–3 月舉辦（日期待定）"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="field-label">活動後延伸復盤週數</label>
+                <select
+                  className="select"
+                  value={tlPostWeeks}
+                  onChange={(e) => setTlPostWeeks(Number(e.target.value))}
+                >
+                  <option value={0}>不延伸會後週</option>
+                  <option value={1}>活動後 1 週</option>
+                  <option value={2}>活動後 2 週（推薦）</option>
+                  <option value={3}>活動後 3 週</option>
+                  <option value={4}>活動後 4 週</option>
+                </select>
+              </div>
+
+              <div className="timeline-preview-hint">
+                <div>
+                  將展開 <strong>倒數 {timelinePreview.prepCount} 週</strong> 會前籌備 ＋ 活動當週
+                  {timelinePreview.postWeeks > 0 ? ` ＋ 會後 ${timelinePreview.postWeeks} 週` : ""}
+                  （共 <strong>{timelinePreview.weeks.length} 週</strong> ·{" "}
+                  <span className="tabular">
+                    {timelinePreview.weeks[0]?.dateRange.split("~")[0]} ~{" "}
+                    {timelinePreview.weeks.at(-1)?.dateRange.split("~")[1]}
+                  </span>
+                  ）
+                </div>
+                <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 3 }}>
+                  現有待辦事項、組別進度重點與撞期警示皆會依週次日期自動保留對齊。
+                </div>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
+                <button type="button" className="btn" onClick={() => setTimelineOpen(false)}>
+                  取消
+                </button>
+                <button type="button" className="btn btn-primary" disabled={tlBusy} onClick={handleApplyTimeline}>
+                  <Check size={14} />
+                  <span>{tlBusy ? "更新時程中…" : "套用時程區間"}</span>
                 </button>
               </div>
             </div>

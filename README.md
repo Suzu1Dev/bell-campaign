@@ -1,49 +1,83 @@
 # BELL Campaign
 
-**BELL Campaign** 是 **BELL Suite** 旗下第 5 套工具（與 `BELL Personal`、`BELL Explain`、`BELL PR`、`BELL Web Reader` 並列），專為活動總召與團隊籌備設計的**每週倒數專案時程與團隊協作工作台**。
+**English** · [繁體中文](./README.zh-TW.md)
 
-## 核心設計與功能
+Local-first weekly countdown timeline, team progress, recruitment gap radar, and event operations workspace built for conference/event directors and cross-functional teams.
 
-1. **Google 試算表結構對齊的每週倒數矩陣（`#/schedule`）**
-   - 從籌備起點切分至「活動當週」與「活動後 1–2 週復盤」，上方標示月份分組、整體進度百分比、重大里程碑與**撞期大型活動警示**（例如 `COSCUP`、人員入伍等），排程時一眼避開高風險時段。
-   - 各大組別連續週次若處於同一進度階段（如 `進度20%`、`進度50%`、`復盤`），自動合併為**橫跨多週的連續階段橫條**並去除重複文字，版面精準不雜亂。
-2. **Google 試算表／Google 簡報與團隊分享中心**
-   - **雙向試算表相容**：支援貼上公開 Google 試算表網址或 CSV 匯入；一鍵複製 TSV 矩陣直接貼進 Google 試算表 `A1`、下載 UTF-8 BOM `.csv`，或複製 Google Apps Script 自動同步腳本。
-   - **16:9 簡報投影模式（Google Slides 對齊）**：內建 16:9 籌備週會簡報檢視器並可綁定外部 Google Slides 連結。
-   - **免登入團隊分享**：匯出單檔離線可讀 `.html` 互動時程表，或一鍵複製 LINE／Discord／Slack 本週籌備週報。
-3. **AI 自動排程與 5 段時程緊湊度調節器**
-   - 輸入主要目標、每月核心目標與待辦清單，自動避開撞期週次並依 **「從容留白 · 穩健緩衝 · 均衡適中 · 緊湊推進 · 密集衝刺」** 五段節奏即時預覽每週負荷分佈圖。
-4. **合作名單與臨時工編制（`#/partners`）**
-   - 將 **特邀講者**、**合作廠商** 與 **臨時工支援** 分類獨立管理，清楚掌握邀約報價與接洽進度；針對**臨時工**獨立顯示所屬組別、各自負責的工作項目清單與即時完成率。
-5. **靈感借鏡（`#/inspirations`）與開案 Bot 對焦**
-   - 開啟新專案時可先與 **Campaign Bot** 聊聊活動形式與規模以規劃專案性質，並在「靈感借鏡」剖析國內外相似活動（如 COSCUP、Figma Config、SITCON、Slush 等）的相似處、時程安排巧思、特別企劃亮點（一鍵存筆記）與前人踩過的坑（一鍵轉防呆待辦）。
-6. **待辦與各組進度追蹤（`#/tasks`）**
-   - 即時統計各大組別完成率與待辦清單，與每週時程矩陣雙向連動，並可一鍵送往 `BELL Personal`。
-7. **招工表單與人力缺口雷達獨立頁（`#/forms`）**
-   - 獨立視覺化呈現各組編制缺口、4 大關鍵出勤時段覆蓋度、專長標籤篩選、一鍵錄取／面談分發，支援 Google 表單 CSV 手動匯入與**連結回覆試算表一鍵去重同步**。
-8. **文件歸檔與 AI 行前手冊生成（`#/files`）**
-   - 上傳與預覽社群發文圖片、協力廠商規格檔案（含沙盒 CSP 防護）。
-   - 一鍵自動生成並歸檔：**〈籌備人員懶人包行前手冊〉**、**〈講者與談人行前手冊〉**、**〈講者／志工行前提醒信〉** 與 **〈協力廠商進撤場須知〉**。
-9. **會議記錄雲端雙向互通（`#/meetings`）與個人筆記（`#/notes`）**
-   - 支援 **Google 文件** 與 **HackMD** 雙向匯入（貼上網址或檔案解析）與匯出（富文本直貼 Google 文件保留 H1/H2 清單、`.doc`、HackMD YAML `.md`）；個人筆記支援釘選與送往 `BELL Explain` 深入拆解。
-10. **Campaign Bot 獨立對話操作頁（`#/bot`）**
-    - 以自然語言請助理對焦開案定位、盤點專案、微調緊湊度、生成手冊、建立週會大綱或審核招工名單，內建免金鑰即時規則引擎並可切換外部大模型。
-11. **BELL Suite 互通契約（`suite-contract v1 rev. f`）**
-    - 內建 `⌘K`／`⌃1–5` 產品切換器、`GET /api/suite/manifest`、`GET /api/suite/today` 與 `#/handoff` 跨工具草稿接收（確認前零寫入）。
+Runs out-of-the-box as an **independent Standalone App** (zero environment variables or external API keys required — includes a built-in deterministic Campaign Bot and 5-level pacing scheduler) or as part of **[BELL Suite](https://github.com/Suzu1Dev/bell-suite)** alongside Personal, Explain, BELL PR, and Web Reader.
 
-## 快速啟動
+## Quick Start
+
+### Install in One Line (macOS / Linux / WSL)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Suzu1Dev/bell-campaign/main/install.sh | sh
+bell-campaign
+```
+
+The installer checks npm first and automatically falls back to cloning from GitHub (`~/.local/share/bell-campaign/app`) and symlinking `~/.local/bin/bell-campaign`, bootstrapping Node.js 24 if needed.
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/Suzu1Dev/bell-campaign/main/install.ps1 | iex
+bell-campaign
+```
+
+### Run via `npx` or From Source
+
+```bash
+# Run directly with npx
+npx bell-campaign
+
+# Or clone and run from source
+git clone https://github.com/Suzu1Dev/bell-campaign.git
+cd bell-campaign
+npm install && npm run build
+./bin/bell-campaign.mjs start
+```
+
+## CLI Usage
+
+```text
+bell-campaign [start] [--port <n>] [--host <h>] [--no-open] [--suite]
+bell-campaign doctor [--json]
+bell-campaign --version | --help
+```
+
+- **Standalone Edition (default)**: listens on `http://127.0.0.1:4640` with local SQLite storage in `./data/` (checkout) or `~/.bell-campaign/data/` (global install).
+- **BELL Suite Edition (`--suite` or `bell-suite start`)**: listens on `http://127.0.0.1:4605`, exposes `/api/suite/manifest` and `/api/suite/today`, accepts `#/tasks?draft=...` handoffs, and sends campaign tasks/notes directly to BELL Personal (`#/tasks`), BELL Explain (`#/explain`), or BELL PR (`#/discover`).
+
+## Key Capabilities
+
+- **Weekly Countdown Matrix (`#/schedule`)**: Google Sheets-compatible multi-team timeline with automatic contiguous stage merging, conflict warnings, 16:9 slide deck mode, and single-file `.html` offline share export.
+- **5-Level Pacing Scheduler**: Preview weekly workload distribution across *Relaxed*, *Buffered*, *Balanced*, * brisk*, and *Sprint* cadences.
+- **Tasks, Partners, Recruitment Radar, Handbooks & Cloud Docs**: Manage team tasks (`#/tasks`), speakers/vendors/staff (`#/partners`), volunteer shift coverage (`#/forms`), handbook generation (`#/files`), and bidirectional Google Docs / HackMD meeting notes (`#/meetings`).
+
+## Architecture Overview
+
+```text
+bin/bell-campaign.mjs  Standalone & Suite CLI (start, doctor, --version, --help)
+src/                   React 19 workspace (Schedule, Tasks, Partners, Forms, Files,
+                       Meetings, Inspirations, Notes, Campaign Bot, Suite switcher)
+shared/                Google Sheets TSV/CSV matrix engine, Google Docs/HackMD parser,
+                       5-level pacing scheduler, and Suite Contract v1 routes
+server/                Express 5 API, SQLite store (node:sqlite), sandboxed uploads,
+                       built-in & optional external AI runners
+Formula/               Homebrew formula template
+```
+
+## Development & Verification
+
+Requires **Node.js 22.13+** (Node.js 24 LTS recommended) for built-in `node:sqlite`.
 
 ```bash
 npm install
-
-# 開發模式（API: 127.0.0.1:21105 + Vite HMR: 127.0.0.1:5177）
-npm run dev
-
-# 型別檢查、單元與 API 測試、正式環境打包
-npm run typecheck
-npm test
-npm run build
-
-# 啟動正式環境單一伺服器（預設 http://127.0.0.1:21105）
-npm start
+npm run dev        # Vite frontend + API watch
+npm test           # Unit & API integration test suite
+npm run build      # TypeScript check + production Vite bundle
 ```
+
+## License
+
+[MIT](./LICENSE)

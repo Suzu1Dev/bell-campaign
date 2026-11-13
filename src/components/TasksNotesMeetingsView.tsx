@@ -19,7 +19,7 @@ import {
   X,
 } from "lucide-react";
 import type { CampaignMeeting, CampaignNote, CampaignSnapshot } from "../../shared/types";
-import { explainDraftHref, personalTaskHref, type SuiteLinks } from "../../shared/suite";
+import { explainDraftHref, personalTaskHref, prDraftHref, type SuiteLinks } from "../../shared/suite";
 import { computeCampaignMetrics } from "../../shared/sheets";
 import { detectDocSourceFromUrl, meetingToGoogleDocHtml, meetingToHackMd } from "../../shared/docs";
 import { apiWrite } from "../lib/api";
@@ -220,6 +220,15 @@ export function TasksView({
                 "#/tasks",
                 window.location.hostname,
               );
+              const prHref = prDraftHref(
+                suiteLinks.pr,
+                {
+                  title: td.title,
+                  draft: `[${snapshot.campaign.name} · ${team?.name ?? "籌備"}] ${td.title}`,
+                  back: "#/tasks",
+                },
+                window.location.hostname,
+              );
               return (
                 <div
                   key={td.id}
@@ -283,6 +292,13 @@ export function TasksView({
                   {personalHref && (
                     <a href={personalHref} className="suite-chip suite-chip-personal" title="送到 BELL Personal 待辦草稿">
                       <span>送到 Personal</span>
+                      <ArrowUpRight size={12} />
+                    </a>
+                  )}
+
+                  {prHref && (
+                    <a href={prHref} className="suite-chip suite-chip-pr" title="送到 BELL PR 貢獻草稿">
+                      <span>送到 BELL PR</span>
                       <ArrowUpRight size={12} />
                     </a>
                   )}

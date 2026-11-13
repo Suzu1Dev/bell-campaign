@@ -6,10 +6,12 @@ import { join } from "node:path";
 import {
   buildGoogleSheetMatrix,
   buildPacingSchedulePreview,
+  buildWeeklyTimelineDefs,
   matrixToCsvBom,
   matrixToTsv,
   normalizeStage,
   parseGoogleSheetCsv,
+  parseMonthNumbers,
 } from "./sheets.js";
 import {
   curateComparableEvents,
@@ -18,9 +20,11 @@ import {
   parseMeetingDoc,
 } from "./docs.js";
 import {
+  allowedSuiteRoute,
   explainDraftHref,
   parseCampaignHandoff,
   personalTaskHref,
+  prDraftHref,
 } from "./suite.js";
 import { CampaignStore } from "../server/store.js";
 
@@ -167,6 +171,32 @@ test("Suite handoff parser enforces allowlisted origins, single params, and clea
     "127.0.0.1",
   );
   assert.ok(eHref?.startsWith("http://127.0.0.1:21101/#/explain?"));
+
+  for (const r of ["#/", "#/home", "#/demo", "#/repos", "#/repos/bell-campaign", "#/discover", "#/team", "#/group", "#/learning", "#/settings", "#/runs/run_7"]) {
+    assert.equal(allowedSuiteRoute("pr", r), true, r);
+  }
+  assert.equal(allowedSuiteRoute("pr", "#/runs/.."), false);
+
+  const fromPr = parseCampaignHandoff(
+    "#/tasks?draft=Sync+landing+copy&title=Landing+PR&from=pr&back=%23%2Fruns%2Frun_7",
+    { ...links, pr: "http://127.0.0.1:4603" },
+  );
+  assert.equal(fromPr.present, true);
+  if (fromPr.present) {
+    assert.equal(fromPr.draft?.from, "pr");
+    assert.equal(fromPr.draft?.title, "Landing PR");
+    assert.equal(fromPr.draft?.backUrl, "http://127.0.0.1:4603/#/runs/run_7");
+  }
+
+  const prHref = prDraftHref(
+    "http://127.0.0.1:4603",
+    { draft: "[COSCUP · 議程組] 更新網站時刻表", title: "更新網站時刻表", back: "#/tasks" },
+    "127.0.0.1",
+  );
+  assert.ok(prHref?.startsWith("http://127.0.0.1:4603/#/discover?"));
+  const prParams = new URLSearchParams(prHref!.split("?")[1]);
+  assert.equal(prParams.get("from"), "campaign");
+  assert.equal(prParams.get("back"), "#/tasks");
 });
 
 test("Bidirectional Google Docs & HackMD meeting parser round-trips cleanly and curates benchmarks", () => {
@@ -211,4 +241,30 @@ test("Bidirectional Google Docs & HackMD meeting parser round-trips cleanly and 
   assert.ok(curated.some((c) => c.region === "國內"));
   assert.ok(curated.some((c) => c.region === "國際"));
   assert.ok(curated.every((c) => c.pitfalls.length >= 2 && c.specialIdeas.length >= 2));
+
+  // Multi-month LiveCTF timeline & month-aware scheduler
+  assert.deepEqual(parseMonthNumbers("11月底～1月初完成出題"), [11, 12, 1]);
+  assert.deepEqual(parseMonthNumbers("十一月"), [11]);
+  const tl = buildWeeklyTimelineDefs({
+    startDate: "2026-11-13",
+    eventDate: "2027-02-27",
+    postWeeks: 2,
+    dateTentative: true,
+    referenceToday: "2026-11-13",
+  });
+  assert.equal(tl.prepCount, 16);
+  assert.equal(tl.weeks.length, 19);
+  assert.equal(tl.weeks[0]?.countdownLabel, "倒數 16 周");
+  assert.equal(tl.weeks[16]?.countdownLabel, "暫定活動當周");
+
+  const ctfCurated = curateComparableEvents({
+    campaignId: "camp-ctf",
+    name: "TSCCTF-2026",
+    subtitle: "全台各校聯合新手 LiveCTF 資安競賽",
+    brief: "核心受眾為全台資安社新手，採 LiveCTF 賽制並進行出題組與 Infra 組協作及各校領獎資格審核",
+    mainGoal: "完成 LiveCTF 題目互驗與跨校新手資格審核",
+    teamNames: ["出題組", "Infra 組", "行政與廠商公關組"],
+  });
+  assert.ok(ctfCurated.some((c) => /LiveCTF/i.test(c.title)));
+  assert.ok(ctfCurated.some((c) => /資安社/.test(c.title)));
 });

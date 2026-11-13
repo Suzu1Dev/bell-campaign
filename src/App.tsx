@@ -28,7 +28,11 @@ import {
   type SuiteLinks,
   type SuiteManifest,
 } from "../shared/suite";
-import { computeCampaignMetrics } from "../shared/sheets";
+import {
+  buildWeeklyTimelineDefs,
+  computeCampaignMetrics,
+  formatCampaignDateLabel,
+} from "../shared/sheets";
 import { apiGet, apiWrite } from "./lib/api";
 import SuiteSwitcher from "./components/SuiteSwitcher";
 import ScheduleView from "./components/ScheduleView";
@@ -125,12 +129,31 @@ export default function App() {
   const toastTimerRef = useRef<number | null>(null);
 
   // Create campaign modal
+  const todayIso = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const defaultFutureIso = useMemo(
+    () => new Date(Date.now() + 14 * 7 * 86400_000).toISOString().slice(0, 10),
+    [],
+  );
   const [newCampOpen, setNewCampOpen] = useState(false);
   const [newCampName, setNewCampName] = useState("");
   const [newCampSub, setNewCampSub] = useState("");
   const [newCampBrief, setNewCampBrief] = useState("");
-  const [newCampDate, setNewCampDate] = useState("2026-09-19");
+  const [newCampStartDate, setNewCampStartDate] = useState(todayIso);
+  const [newCampDate, setNewCampDate] = useState(defaultFutureIso);
+  const [newCampTentative, setNewCampTentative] = useState(false);
+  const [newCampTentativeNote, setNewCampTentativeNote] = useState("");
   const [newCampPostWeeks, setNewCampPostWeeks] = useState(2);
+
+  const newCampTimelinePreview = useMemo(
+    () =>
+      buildWeeklyTimelineDefs({
+        startDate: newCampStartDate,
+        eventDate: newCampDate,
+        postWeeks: newCampPostWeeks,
+        dateTentative: newCampTentative,
+      }),
+    [newCampStartDate, newCampDate, newCampPostWeeks, newCampTentative],
+  );
 
   const notify = useCallback((msg: string) => {
     setToast(msg);
@@ -297,14 +320,19 @@ export default function App() {
         name: newCampName.trim(),
         subtitle: newCampSub.trim() || undefined,
         brief: newCampBrief.trim() || undefined,
+        startDate: newCampStartDate || undefined,
         eventDate: newCampDate,
         postWeeks: newCampPostWeeks,
+        dateTentative: newCampTentative,
+        tentativeNote: newCampTentative ? newCampTentativeNote.trim() || "日期待定" : "",
       });
       setSnapshot(next);
       setNewCampOpen(false);
       setNewCampName("");
       setNewCampSub("");
       setNewCampBrief("");
+      setNewCampTentative(false);
+      setNewCampTentativeNote("");
       navigate(targetRoute);
       notify(
         targetRoute === "bot"
@@ -403,8 +431,12 @@ export default function App() {
                   </option>
                 ))}
               </select>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 11.5, color: "var(--text-3)" }}>
-                <span className="tabular">活動日 {snapshot.campaign.eventDate}</span>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 11.5, color: "var(--text-3)", gap: 6 }}>
+                <span className="tabular" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {snapshot.campaign.dateTentative
+                    ? formatCampaignDateLabel(snapshot.campaign)
+                    : `活動日 ${snapshot.campaign.eventDate}`}
+                </span>
                 <button
                   type="button"
                   className="btn btn-ghost btn-sm"
@@ -723,27 +755,89 @@ export default function App() {
                 />
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <div>
-                  <label className="field-label">正式活動日期 *</label>
-                  <input
-                    required
-                    type="date"
-                    className="input"
-                    value={newCampDate}
-                    onChange={(e) => setNewCampDate(e.target.value)}
-                  />
+              <div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                  <label className="field-label" style={{ marginBottom: 0 }}>活動時程與舉辦日期</label>
+                  <div className="segmented-inline" role="radiogroup" aria-label="日期確定狀態">
+                    <button
+                      type="button"
+                      className={`seg-btn ${!newCampTentative ? "is-active" : ""}`}
+                      onClick={() => setNewCampTentative(false)}
+                    >
+                      已確定日期
+                    </button>
+                    <button
+                      type="button"
+                      className={`seg-btn ${newCampTentative ? "is-active" : ""}`}
+                      onClick={() => {
+                        setNewCampTentative(true);
+                        if (!newCampTentativeNote.trim()) {
+                          const ym = newCampDate.slice(0, 7).split("-");
+                          const m = Number(ym[1] || 2);
+                          setNewCampTentativeNote(`預計 ${ym[0]} 年 ${m}–${(m % 12) + 1} 月（日期待定）`);
+                        }
+                      }}
+                    >
+                      日期待定（先排月份）
+                    </button>
+                  </div>
                 </div>
-                <div>
-                  <label className="field-label">活動後延伸復盤週數</label>
-                  <select
-                    className="select"
-                    value={newCampPostWeeks}
-                    onChange={(e) => setNewCampPostWeeks(Number(e.target.value))}
-                  >
-                    <option value={1}>活動後 1 週</option>
-                    <option value={2}>活動後 2 週（推薦）</option>
-                  </select>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                  <div>
+                    <label className="field-label">籌備起算日</label>
+                    <input
+                      required
+                      type="date"
+                      className="input"
+                      value={newCampStartDate}
+                      onChange={(e) => setNewCampStartDate(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="field-label">{newCampTentative ? "暫定基準日（展開週次用）" : "正式活動日期 *"}</label>
+                    <input
+                      required
+                      type="date"
+                      className="input"
+                      value={newCampDate}
+                      onChange={(e) => setNewCampDate(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="field-label">會後復盤週數</label>
+                    <select
+                      className="select"
+                      value={newCampPostWeeks}
+                      onChange={(e) => setNewCampPostWeeks(Number(e.target.value))}
+                    >
+                      <option value={0}>不延伸會後週</option>
+                      <option value={1}>活動後 1 週</option>
+                      <option value={2}>活動後 2 週（推薦）</option>
+                      <option value={3}>活動後 3 週</option>
+                      <option value={4}>活動後 4 週</option>
+                    </select>
+                  </div>
+                </div>
+
+                {newCampTentative && (
+                  <div style={{ marginTop: 10 }}>
+                    <label className="field-label">預計舉辦月份／區間說明（定案後可隨時一鍵對齊正式日期）</label>
+                    <input
+                      className="input"
+                      placeholder="例如：預計 2027 年 2–3 月舉辦（一籌確認各校檔期後定案）"
+                      value={newCampTentativeNote}
+                      onChange={(e) => setNewCampTentativeNote(e.target.value)}
+                    />
+                  </div>
+                )}
+
+                <div className="timeline-preview-hint">
+                  <span>
+                    將自動建立 <strong>倒數 {newCampTimelinePreview.prepCount} 週</strong> 會前籌備 ＋ 活動當週
+                    {newCampTimelinePreview.postWeeks > 0 ? ` ＋ 會後 ${newCampTimelinePreview.postWeeks} 週` : ""}
+                    （共 <strong>{newCampTimelinePreview.weeks.length} 週</strong>，支援 1–52 週長程規劃）
+                  </span>
                 </div>
               </div>
 

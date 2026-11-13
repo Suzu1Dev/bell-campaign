@@ -36,7 +36,7 @@ const SINGLE_HANDOFF_PARAMS = ["text", "title", "draft", "from", "back"] as cons
 export const SUITE_ROUTES: Record<SuiteAppId, readonly string[]> = {
   explain: ["#/", "#/library", "#/graph", "#/favorites", "#/repositories", "#/review", "#/note/{id}"],
   personal: ["#/today", "#/tasks", "#/tasks/{id}", "#/events", "#/events/{id}", "#/ideas", "#/ideas/{id}", "#/inbox", "#/inbox/{id}"],
-  pr: [],
+  pr: ["#/", "#/home", "#/demo", "#/repos", "#/repos/{id}", "#/discover", "#/team", "#/group", "#/learning", "#/settings", "#/runs/{id}"],
   reader: ["#/", "#/library", "#/topics", "#/page/{id}"],
   campaign: [
     "#/",
@@ -155,7 +155,7 @@ function cleanText(value: string, max: number): { text: string; truncated: boole
 
 export function isCampaignHandoffAttempt(hash: string): boolean {
   const [path, query = ""] = String(hash).replace(/^#/, "").split("?", 2);
-  if (path !== "/handoff" || !query) return false;
+  if ((path !== "/tasks" && path !== "/handoff") || !query) return false;
   const params = new URLSearchParams(query);
   return SINGLE_HANDOFF_PARAMS.some((key) => params.has(key));
 }
@@ -227,4 +227,23 @@ export function personalTaskHref(
     params.set("back", back);
   }
   return `${origin}/#/tasks?${params.toString()}`;
+}
+
+export function prDraftHref(
+  prOrigin: string | undefined,
+  input: { draft: string; title?: string; back?: string },
+  currentHostname = "",
+): string | undefined {
+  const origin = safeSuiteOrigin(prOrigin, currentHostname);
+  const body = cleanText(input.draft, SUITE_LIMITS.handoffText);
+  if (!origin || !body.text) return undefined;
+  const params = new URLSearchParams({ draft: body.text, from: "campaign" });
+  if (input.title) {
+    const cleanTitle = cleanText(input.title.replace(/[\r\n\t]/g, " "), SUITE_LIMITS.handoffTitle);
+    if (cleanTitle.text) params.set("title", cleanTitle.text);
+  }
+  if (input.back && allowedSuiteRoute("campaign", input.back, SUITE_LIMITS.back)) {
+    params.set("back", input.back);
+  }
+  return `${origin}/#/discover?${params.toString()}`;
 }

@@ -4,6 +4,7 @@ import {
   TEAM_COLORS,
   type AutoScheduleInput,
   type AutoSchedulePreview,
+  type CampaignSummary,
   type CampaignSnapshot,
   type CellStage,
   type ProposedCellChange,
@@ -30,6 +31,155 @@ const STAGE_PROGRESS_MAP: Record<CellStage, number> = {
 
 export function stageToPercent(stage: CellStage): number {
   return STAGE_PROGRESS_MAP[stage] ?? 0;
+}
+
+export const MAX_PREP_WEEKS = 52;
+export const MONTH_LABELS_ZH = [
+  "一月",
+  "二月",
+  "三月",
+  "四月",
+  "五月",
+  "六月",
+  "七月",
+  "八月",
+  "九月",
+  "十月",
+  "十一月",
+  "十二月",
+] as const;
+
+const ZH_NUM_MAP: Record<string, number> = {
+  十二: 12,
+  十一: 11,
+  十: 10,
+  九: 9,
+  八: 8,
+  七: 7,
+  六: 6,
+  五: 5,
+  四: 4,
+  三: 3,
+  二: 2,
+  一: 1,
+};
+
+/** Extracts 1..12 month numbers from Chinese ("十一月") or Arabic ("11月", "11月底～1月初", "2-3月") strings. */
+export function parseMonthNumbers(raw: string): number[] {
+  const found = new Set<number>();
+  const rangeRegex = /(\d{1,2})\s*(?:月(?:底|初|中)?)?\s*[~～\-至到]\s*(\d{1,2})\s*月/g;
+  for (const m of raw.matchAll(rangeRegex)) {
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    if (a >= 1 && a <= 12 && b >= 1 && b <= 12) {
+      let cur = a;
+      for (let guard = 0; guard < 12; guard++) {
+        found.add(cur);
+        if (cur === b) break;
+        cur = (cur % 12) + 1;
+      }
+    }
+  }
+  for (const m of raw.matchAll(/(?<!\d)(1[0-2]|[1-9])\s*月/g)) {
+    found.add(Number(m[1]));
+  }
+  for (const [zh, num] of Object.entries(ZH_NUM_MAP)) {
+    if (raw.includes(`${zh}月`)) {
+      if (num === 1 && raw.includes("十一月") && !/(?<!十)一月/.test(raw)) continue;
+      if (num === 2 && raw.includes("十二月") && !/(?<!十)二月/.test(raw)) continue;
+      found.add(num);
+    }
+  }
+  return [...found];
+}
+
+export function formatCampaignDateLabel(
+  campaign: Pick<CampaignSummary, "eventDate" | "dateTentative" | "tentativeNote">,
+): string {
+  if (campaign.dateTentative) {
+    return campaign.tentativeNote.trim() || `${campaign.eventDate}（日期待定）`;
+  }
+  return campaign.eventDate;
+}
+
+export interface WeeklyTimelineDef {
+  orderIndex: number;
+  monthLabel: string;
+  dateRange: string;
+  startDate: string;
+  endDate: string;
+  countdownLabel: string;
+  phase: "prep" | "event" | "post";
+  stage: CellStage;
+}
+
+export interface BuildTimelineInput {
+  eventDate: string;
+  startDate?: string;
+  prepWeeks?: number;
+  postWeeks?: number;
+  dateTentative?: boolean;
+  referenceToday?: string;
+}
+
+export function buildWeeklyTimelineDefs(input: BuildTimelineInput): {
+  startIso: string;
+  prepCount: number;
+  postWeeks: number;
+  weeks: WeeklyTimelineDef[];
+} {
+  const postWeeks = Math.max(0, Math.min(8, input.postWeeks ?? 2));
+  const todayIso = input.referenceToday || new Date().toISOString().slice(0, 10);
+  const todayTime = Date.parse(`${todayIso}T00:00:00Z`);
+  const eventTime = Date.parse(`${input.eventDate}T00:00:00Z`);
+  const safeEventTime = Number.isFinite(eventTime) ? eventTime : todayTime + 6 * 7 * 86400_000;
+
+  let prepCount = 6;
+  if (input.prepWeeks !== undefined && Number.isFinite(input.prepWeeks)) {
+    prepCount = Math.max(1, Math.min(MAX_PREP_WEEKS, Math.round(input.prepWeeks)));
+  } else if (input.startDate && /^\d{4}-\d{2}-\d{2}$/.test(input.startDate)) {
+    const startTime = Date.parse(`${input.startDate}T00:00:00Z`);
+    if (Number.isFinite(startTime) && safeEventTime > startTime) {
+      prepCount = Math.max(1, Math.min(MAX_PREP_WEEKS, Math.ceil((safeEventTime - startTime) / (7 * 86400_000))));
+    } else if (Number.isFinite(startTime)) {
+      prepCount = 1;
+    }
+  } else if (safeEventTime > todayTime) {
+    prepCount = Math.max(1, Math.min(MAX_PREP_WEEKS, Math.ceil((safeEventTime - todayTime) / (7 * 86400_000))));
+  }
+
+  const baseStart = new Date(safeEventTime - prepCount * 7 * 86400_000);
+  const startIso = baseStart.toISOString().slice(0, 10);
+  const totalWeeks = prepCount + 1 + postWeeks;
+  const fmt = (d: Date) => `${d.getUTCMonth() + 1}/${String(d.getUTCDate()).padStart(2, "0")}`;
+
+  const weeks: WeeklyTimelineDef[] = [];
+  for (let i = 0; i < totalWeeks; i++) {
+    const ws = new Date(baseStart.getTime() + i * 7 * 86400_000);
+    const we = new Date(ws.getTime() + 6 * 86400_000);
+    const phase: "prep" | "event" | "post" = i < prepCount ? "prep" : i === prepCount ? "event" : "post";
+    const countdownLabel =
+      phase === "prep"
+        ? `倒數 ${prepCount - i} 周`
+        : phase === "event"
+          ? input.dateTentative
+            ? "暫定活動當周"
+            : "活動當周"
+          : `活動後 ${i - prepCount} 周`;
+
+    weeks.push({
+      orderIndex: i,
+      monthLabel: MONTH_LABELS_ZH[ws.getUTCMonth()],
+      dateRange: `${fmt(ws)}~${fmt(we)}`,
+      startDate: ws.toISOString().slice(0, 10),
+      endDate: we.toISOString().slice(0, 10),
+      countdownLabel,
+      phase,
+      stage: defaultWeekStage(phase, i, prepCount),
+    });
+  }
+
+  return { startIso, prepCount, postWeeks, weeks };
 }
 
 export function defaultWeekStage(
@@ -500,7 +650,7 @@ export function buildWeeklyDigestText(snapshot: CampaignSnapshot): string {
 
   const lines: string[] = [
     `【${snapshot.campaign.name} · 時程協作週報】`,
-    `活動日期：${snapshot.campaign.eventDate} ｜ 整體完成度：${metrics.overallPercent}%（${metrics.completedTodos}/${metrics.totalTodos} 項待辦）`,
+    `活動日期：${formatCampaignDateLabel(snapshot.campaign)} ｜ 整體完成度：${metrics.overallPercent}%（${metrics.completedTodos}/${metrics.totalTodos} 項待辦）`,
   ];
 
   if (activeWeek) {
@@ -671,7 +821,7 @@ export function buildStandaloneShareHtml(snapshot: CampaignSnapshot): string {
   <header>
     <div>
       <h1>${escapeHtml(snapshot.campaign.name)}</h1>
-      <div class="meta">${escapeHtml(snapshot.campaign.subtitle)} · 活動日 ${escapeHtml(snapshot.campaign.eventDate)}</div>
+      <div class="meta">${escapeHtml(snapshot.campaign.subtitle)} · 活動時間 ${escapeHtml(formatCampaignDateLabel(snapshot.campaign))}</div>
     </div>
     <div class="kpi">整體進度 <strong>${metrics.overallPercent}%</strong> · 已完成 ${metrics.completedTodos}/${metrics.totalTodos} 待辦</div>
   </header>
@@ -739,34 +889,76 @@ export function buildPacingSchedulePreview(
 
   if (teams.length > 0) {
     rawLines.forEach((line, idx) => {
-      // Match "[組別] 任務" or keyword affinity, otherwise round-robin across teams
-      let matchedTeam = teams[idx % teams.length];
-      for (const t of teams) {
-        if (line.includes(t.name) || (t.name.includes("行銷") && /社群|貼文|宣傳|視覺|設計/.test(line)) || (t.name.includes("場務") && /場地|報到|器材|動線|便當|志工/.test(line)) || ((t.name.includes("講者") || t.name.includes("Panel") || t.name.includes("咖啡")) && /講者|信件|題綱|主持|簡報|名單/.test(line))) {
-          matchedTeam = t;
-          break;
+      // 1. Explicit team prefix / name mention wins first; 2. Keyword affinity; 3. Round-robin
+      let matchedTeam =
+        teams.find((t) => line.startsWith(t.name) || line.startsWith(`[${t.name}]`)) ??
+        teams.find((t) => line.includes(t.name));
+
+      if (!matchedTeam) {
+        for (const t of teams) {
+          const tn = t.name.toLowerCase();
+          if (
+            ((tn.includes("出題") || tn.includes("競賽") || tn.includes("賽務")) &&
+              /出題|驗題|賽制|輪次|題目|解題|flag|livectf/i.test(line)) ||
+            ((tn.includes("infra") || tn.includes("技術") || tn.includes("平台") || tn.includes("架構")) &&
+              /infra|平台|靶機|容器|環境|伺服器|部署|計分|轉播/i.test(line)) ||
+            ((tn.includes("社團") || tn.includes("各校") || tn.includes("資格")) &&
+              /各校|社團|資格|領獎|新手|社員|審核/.test(line)) ||
+            ((tn.includes("行政") || tn.includes("廠商") || tn.includes("公關") || tn.includes("贊助")) &&
+              /行政|廠商|贊助|洽談|報名|預算|核銷/.test(line)) ||
+            ((tn.includes("行銷") || tn.includes("宣傳") || tn.includes("設計")) &&
+              /社群|貼文|宣傳|視覺|設計|曝光/.test(line)) ||
+            (tn.includes("場務") && /場地|報到|器材|動線|便當|志工/.test(line)) ||
+            ((tn.includes("講者") || tn.includes("panel") || tn.includes("咖啡") || tn.includes("議程")) &&
+              /講者|信件|題綱|主持|簡報|名單|議程/.test(line))
+          ) {
+            matchedTeam = t;
+            break;
+          }
         }
       }
-      const cleanTitle = line.replace(new RegExp(`^\\[?${matchedTeam.name}\\]?[:：\\s-]*`), "").trim() || line;
+      if (!matchedTeam) matchedTeam = teams[idx % teams.length];
+      const escapedTeam = matchedTeam.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const cleanTitle = line.replace(new RegExp(`^\\[?${escapedTeam}\\]?[:：\\s-]*`), "").trim() || line;
 
-      // Pick the prep week with highest remaining capacity ratio
+      const hintedMonths = parseMonthNumbers(line);
+      const prefersMonthEnd = /月底|底前|下旬/.test(line);
+      const prefersMonthStart = /月初|上旬/.test(line);
+
+      // Pick the prep week with highest remaining capacity ratio (honoring month hints when present)
       let bestSlot = slotWeights[0];
       let bestScore = -Infinity;
-      for (const slot of slotWeights) {
+      slotWeights.forEach((slot, sIdx) => {
         const loadPenalty = slot.assigned / Math.max(1, meta.maxTasksPerTeamWeek * Math.max(1, teams.length / 2));
-        const candidateScore = slot.weight - loadPenalty;
+        let monthBonus = 0;
+        if (hintedMonths.length > 0) {
+          const slotMonths = parseMonthNumbers(slot.week.monthLabel);
+          const startMonth = Number(slot.week.dateRange.split("/")[0]);
+          if (Number.isFinite(startMonth) && startMonth >= 1 && startMonth <= 12 && !slotMonths.includes(startMonth)) {
+            slotMonths.push(startMonth);
+          }
+          if (slotMonths.some((m) => hintedMonths.includes(m))) {
+            monthBonus += 3.2;
+            const startDay = Number(slot.week.dateRange.split("/")[1]?.split(/[~-]/)[0] ?? 15);
+            if (prefersMonthEnd && startDay >= 18) monthBonus += 0.8;
+            else if (prefersMonthStart && startDay <= 12) monthBonus += 0.8;
+          } else {
+            monthBonus -= 1.5 - sIdx * 0.01;
+          }
+        }
+        const candidateScore = slot.weight + monthBonus - loadPenalty;
         if (candidateScore > bestScore) {
           bestScore = candidateScore;
           bestSlot = slot;
         }
-      }
+      });
       bestSlot.assigned += 1;
 
       todos.push({
         teamId: matchedTeam.id,
         weekId: bestSlot.week.id,
         title: cleanTitle,
-        priority: /確認|死線|寄出|定案|收齊/.test(cleanTitle) ? "high" : "normal",
+        priority: /確認|死線|寄出|定案|收齊|驗題|資格|審核/.test(cleanTitle) ? "high" : "normal",
       });
     });
   }
@@ -800,16 +992,32 @@ export function buildPacingSchedulePreview(
       const stage = weekStageMap.get(week.id) ?? "進度50%";
 
       const weekTeamTodos = todos.filter((t) => t.teamId === team.id && t.weekId === week.id);
-      const monthGoal = input.monthlyGoals.find((g) => week.monthLabel.includes(g.month) || g.month.includes(week.monthLabel));
+      const weekMonths = parseMonthNumbers(week.monthLabel);
+      const monthGoal = input.monthlyGoals.find((g) => {
+        const gMonths = parseMonthNumbers(g.month);
+        return (
+          (gMonths.length > 0 && weekMonths.some((m) => gMonths.includes(m))) ||
+          week.monthLabel.includes(g.month) ||
+          g.month.includes(week.monthLabel)
+        );
+      });
+      const trimClause = (s: string, maxLen = 22): string => {
+        let clause = s.split(/[；;。（(]/)[0]?.trim() || s.trim();
+        if (clause.length > maxLen && clause.includes("，")) {
+          const head = clause.split("，")[0]?.trim() ?? "";
+          if (head.length >= 6) clause = head;
+        }
+        return clause.length <= maxLen ? clause : `${clause.slice(0, maxLen - 1)}…`;
+      };
       const focus =
         weekTeamTodos.length > 0
-          ? weekTeamTodos.map((t) => t.title.slice(0, 14)).slice(0, 2).join(" · ")
+          ? weekTeamTodos.map((t) => trimClause(t.title, 20)).slice(0, 2).join(" · ")
           : inBuffer
             ? stage === "RC"
               ? "總彩排驗收與最終確認"
               : "跨組流程除錯與備案檢核"
             : monthGoal?.goal
-              ? `${monthGoal.goal.slice(0, 16)}`
+              ? trimClause(monthGoal.goal, 22)
               : "依排程推進組內交付";
 
       cells.push({

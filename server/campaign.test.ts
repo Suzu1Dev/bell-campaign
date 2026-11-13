@@ -320,3 +320,64 @@ test("Meetings cloud doc import/export, Partners & Temp Staff tasks, Inspiration
     assert.equal(syncBody2.snapshot.formResponses.length, syncBody1.snapshot.formResponses.length);
   });
 });
+
+test("Long-term multi-month timeline (>6 weeks), tentative dates, and non-destructive timeline expansion", async () => {
+  await withServer(async (baseUrl) => {
+    const createRes = await fetch(`${baseUrl}/api/campaigns`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "TSCCTF 聯合新手資安賽",
+        subtitle: "LiveCTF 跨校競賽",
+        brief: "全台資安社新手社員競賽，11月確認賽制與Infra合作，12月報名宣傳，1月互驗與資格審核",
+        startDate: "2026-11-13",
+        eventDate: "2026-12-25",
+        postWeeks: 2,
+        dateTentative: true,
+        tentativeNote: "預計 2027 年 2–3 月舉辦（日期待定）",
+      }),
+    });
+    assert.equal(createRes.status, 201);
+    let snap = (await createRes.json()) as CampaignSnapshot;
+    const cid = snap.campaign.id;
+    assert.equal(snap.campaign.dateTentative, true);
+    assert.equal(snap.campaign.tentativeNote, "預計 2027 年 2–3 月舉辦（日期待定）");
+    assert.equal(snap.weeks.filter((w) => w.phase === "prep").length, 6);
+    assert.ok(snap.teams.some((t) => t.name === "出題組"));
+    assert.ok(snap.teams.some((t) => t.name === "Infra 組"));
+
+    // Add a dated todo before expanding timeline from 6 prep weeks to 16 prep weeks
+    const targetWeek = snap.weeks[2];
+    const todoRes = await fetch(`${baseUrl}/api/campaigns/${cid}/todos`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        teamId: snap.teams[0].id,
+        weekId: targetWeek.id,
+        title: "11月底啟動第一批題目容器封裝",
+        priority: "high",
+      }),
+    });
+    assert.equal(todoRes.status, 201);
+
+    // Expand timeline to late Feb (16 prep weeks) and verify zero todo loss
+    const tlRes = await fetch(`${baseUrl}/api/campaigns/${cid}/timeline`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        startDate: "2026-11-13",
+        eventDate: "2027-02-27",
+        postWeeks: 2,
+        dateTentative: true,
+        tentativeNote: "預計 2027 年 2–3 月舉辦（日期待定）",
+      }),
+    });
+    assert.equal(tlRes.status, 200);
+    snap = (await tlRes.json()) as CampaignSnapshot;
+    assert.equal(snap.weeks.filter((w) => w.phase === "prep").length, 16);
+    assert.equal(snap.weeks[0]?.countdownLabel, "倒數 16 周");
+    const preservedTodo = snap.todos.find((t) => t.title.includes("第一批題目容器封裝"));
+    assert.ok(preservedTodo);
+    assert.ok(preservedTodo.weekId && snap.weeks.some((w) => w.id === preservedTodo.weekId));
+  });
+});

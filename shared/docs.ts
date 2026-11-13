@@ -257,6 +257,42 @@ interface BenchmarkTemplate {
 
 const BENCHMARK_LIBRARY: readonly BenchmarkTemplate[] = [
   {
+    title: "DEF CON LiveCTF（拉斯維加斯／全球連線）",
+    region: "國際",
+    category: "即時攻防解題與實況競賽",
+    keywords: /ctf|livectf|資安|出題|驗題|infra|靶機|競賽|賽制|輪次|pwn|web|crypto|reverse/i,
+    baseScore: 89,
+    defaultWhy: "採即時輪次制的動態解題與容器化環境調度，高度考驗出題組與 Infra 組在題目隔離、Exploit 重播驗證與輪次節奏上的緊密配合。",
+    timelinePattern: "開賽前 12–16 週敲定輪次賽制與容器規格 → 倒數 6–8 週鎖定題目初稿與標準 Docker 映像檔 → 倒數 3–4 週完成跨人盲測互驗（Playtesting）與負載壓測。",
+    specialIdeas: [
+      "出題組與 Infra 組在開案第一個月先定訂統一的「Challenge Spec 模板（Dockerfile + healthcheck + 自動 exploit 測試腳本）」，避免賽前一週人工搬題出錯",
+      "針對新手友善度，可在 LiveCTF 輪次設計「破冰暖身題（Warm-up Round）+ 即時解題動態轉播面板」，讓全球觀眾與各校新手都有強烈參與感",
+      "賽後立即開源部分經典題目環境與官方 Writeup 徵集獎勵，延續各校資安社下學期讀書會教材價值",
+    ],
+    pitfalls: [
+      "LiveCTF 最常踩坑的是「選手提交的測試容器未嚴格限制 CPU／PID／外網連線」，導致單一 fork bomb 或資源耗盡拖垮整台母機——Infra 組務必在 1 月驗題期實測 cgroup 與網路白名單",
+      "出題組自我驗題極易盲點漏看非預期解（Unintended Solution）——務必強制「非出題者盲測互驗」並在賽前 3 週凍結題目難度曲線",
+    ],
+  },
+  {
+    title: "AIS3 EOF × 台灣跨校資安社聯合新手賽",
+    region: "國內",
+    category: "跨校資安社群與雙軌資格賽",
+    keywords: /資安|社團|新手|跨校|聯合|ctf|領獎|資格|各校|廠商|贊助|學生/i,
+    baseScore: 88,
+    defaultWhy: "同樣面向全台各校資安社社員並開放外部／國際隊伍同場切磋，需同時處理各校資格名單審核、企業贊助對接與寒假前後檔期避撞。",
+    timelinePattern: "11 月各校社團定檔並啟動廠商贊助企劃書 → 12 月開放雙軌報名與宣傳 → 1 月完成各校新手領獎資格審核與題庫互驗 → 2–3 月避開春節與大型年會正式開賽。",
+    specialIdeas: [
+      "計分板內建「Global Open 總榜」與「籌備校資安社新手專屬領獎榜」雙視角切換，兼顧全球 100–200 隊競技熱度與國內 10–20 位社團新手的獲獎成就感",
+      "廠商贊助包可結合「企業冠名特色題／實習媒合履歷投遞通道」，大幅提高資安廠商在年底至年初編列贊助預算的意願",
+      "由各校資安社指派 1 名「校內審核聯絡人」，在 1 月底前透過統一表單核對社員學籍與新手年資，避免賽後領獎爭議",
+    ],
+    pitfalls: [
+      "2–3 月舉辦務必避開「農曆春節連假、1 月底學測、2 月中下旬開學選課週與 3 月初 SITCON 年會」及國際大型 CTF（如 DiceCTF／LA CTF）撞期週末",
+      "「新手資格」定義（例如：入社長度、是否曾於大型公開賽獲獎）若未在 12 月報名簡章寫死，賽後極易引發資格認定爭議",
+    ],
+  },
+  {
     title: "COSCUP 開源人年會",
     region: "國內",
     category: "多軌技術社群年會",

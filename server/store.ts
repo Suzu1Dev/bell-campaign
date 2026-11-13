@@ -45,7 +45,13 @@ import {
   type WeekEventItem,
 } from "../shared/types.js";
 import { curateComparableEvents } from "../shared/docs.js";
-import { defaultWeekStage, parseCsvGrid, parseGoogleSheetCsv } from "../shared/sheets.js";
+import {
+  buildWeeklyTimelineDefs,
+  defaultWeekStage,
+  formatCampaignDateLabel,
+  parseCsvGrid,
+  parseGoogleSheetCsv,
+} from "../shared/sheets.js";
 import { AppError } from "./errors.js";
 
 const DEFAULT_SETTINGS: ProviderSettings = {
@@ -276,6 +282,8 @@ export class CampaignStore {
     `);
 
     this.ensureColumn("campaigns", "brief", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("campaigns", "date_tentative", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("campaigns", "tentative_note", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("weeks", "stage", "TEXT NOT NULL DEFAULT '待排'");
     this.ensureColumn("meetings", "doc_url", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("meetings", "doc_source", "TEXT NOT NULL DEFAULT ''");
@@ -1241,7 +1249,9 @@ export class CampaignStore {
   // ── Campaigns & Full Snapshot ────────────────────────────────────────────
   listCampaigns(): CampaignSummary[] {
     const rows = this.db
-      .prepare("SELECT id, name, subtitle, event_date, start_date, post_weeks, pacing, updated_at FROM campaigns ORDER BY updated_at DESC")
+      .prepare(
+        "SELECT id, name, subtitle, event_date, start_date, post_weeks, date_tentative, tentative_note, pacing, updated_at FROM campaigns ORDER BY updated_at DESC",
+      )
       .all() as Array<{
       id: string;
       name: string;
@@ -1249,6 +1259,8 @@ export class CampaignStore {
       event_date: string;
       start_date: string;
       post_weeks: number;
+      date_tentative?: number;
+      tentative_note?: string;
       pacing: string;
       updated_at: string;
     }>;
@@ -1259,6 +1271,8 @@ export class CampaignStore {
       eventDate: r.event_date,
       startDate: r.start_date,
       postWeeks: r.post_weeks,
+      dateTentative: Boolean(r.date_tentative),
+      tentativeNote: String(r.tentative_note ?? ""),
       pacing: (PACING_LEVELS as readonly string[]).includes(r.pacing) ? (r.pacing as PacingLevel) : "balanced",
       updatedAt: r.updated_at,
     }));
@@ -1283,6 +1297,8 @@ export class CampaignStore {
           event_date: string;
           start_date: string;
           post_weeks: number;
+          date_tentative?: number;
+          tentative_note?: string;
           pacing: string;
           main_goal: string;
           monthly_goals_json: string;
@@ -1302,6 +1318,8 @@ export class CampaignStore {
       eventDate: row.event_date,
       startDate: row.start_date,
       postWeeks: row.post_weeks,
+      dateTentative: Boolean(row.date_tentative),
+      tentativeNote: String(row.tentative_note ?? ""),
       pacing: (PACING_LEVELS as readonly string[]).includes(row.pacing) ? (row.pacing as PacingLevel) : "balanced",
       mainGoal: row.main_goal,
       monthlyGoals: safeJsonParse<MonthlyGoal[]>(row.monthly_goals_json, []),
@@ -1549,62 +1567,82 @@ export class CampaignStore {
     };
   }
 
-  createCampaign(input: { name: string; subtitle?: string; brief?: string; eventDate: string; postWeeks?: number }): CampaignSnapshot {
+  createCampaign(input: {
+    name: string;
+    subtitle?: string;
+    brief?: string;
+    eventDate: string;
+    startDate?: string;
+    prepWeeks?: number;
+    postWeeks?: number;
+    dateTentative?: boolean;
+    tentativeNote?: string;
+  }): CampaignSnapshot {
     const now = new Date().toISOString();
     const id = `camp-${randomUUID().slice(0, 8)}`;
-    const postWeeks = Math.max(0, Math.min(4, input.postWeeks ?? 2));
-    const eventTime = Date.parse(`${input.eventDate}T00:00:00Z`);
-    const prepCount = 6;
-    const baseStart = Number.isFinite(eventTime)
-      ? new Date(eventTime - prepCount * 7 * 86400_000)
-      : new Date();
-    const startIso = baseStart.toISOString().slice(0, 10);
+    const dateTentative = Boolean(input.dateTentative);
+    const tentativeNote = (input.tentativeNote ?? "").trim();
+    const timeline = buildWeeklyTimelineDefs({
+      eventDate: input.eventDate,
+      startDate: input.startDate,
+      prepWeeks: input.prepWeeks,
+      postWeeks: input.postWeeks,
+      dateTentative,
+    });
     const brief = (input.brief ?? "").trim();
 
     this.db
       .prepare(
-        `INSERT INTO campaigns (id, name, subtitle, brief, event_date, start_date, post_weeks, pacing, main_goal, monthly_goals_json, sheet_url, slides_url, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'balanced', ?, '[]', '', '', ?)`,
+        `INSERT INTO campaigns (id, name, subtitle, brief, event_date, start_date, post_weeks, date_tentative, tentative_note, pacing, main_goal, monthly_goals_json, sheet_url, slides_url, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'balanced', ?, '[]', '', '', ?)`,
       )
-      .run(id, input.name.trim(), (input.subtitle ?? "").trim(), brief, input.eventDate, startIso, postWeeks, brief, now);
+      .run(
+        id,
+        input.name.trim(),
+        (input.subtitle ?? "").trim(),
+        brief,
+        input.eventDate,
+        timeline.startIso,
+        timeline.postWeeks,
+        dateTentative ? 1 : 0,
+        tentativeNote,
+        brief,
+        now,
+      );
 
-    const monthNames = ["一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月"];
-    const totalWeeks = prepCount + 1 + postWeeks;
     const insertWeek = this.db.prepare(
       `INSERT INTO weeks (id, campaign_id, order_index, month_label, date_range, start_date, end_date, countdown_label, phase, stage, major_events_json, memo)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '')`,
     );
 
-    for (let i = 0; i < totalWeeks; i++) {
-      const ws = new Date(baseStart.getTime() + i * 7 * 86400_000);
-      const we = new Date(ws.getTime() + 6 * 86400_000);
-      const fmt = (d: Date) => `${d.getUTCMonth() + 1}/${String(d.getUTCDate()).padStart(2, "0")}`;
-      const phase: "prep" | "event" | "post" = i < prepCount ? "prep" : i === prepCount ? "event" : "post";
-      const countdown =
-        phase === "prep"
-          ? `倒數 ${prepCount - i} 周`
-          : phase === "event"
-            ? "活動當周"
-            : `活動後 ${i - prepCount} 周`;
+    for (const wk of timeline.weeks) {
       insertWeek.run(
         `wk-${randomUUID().slice(0, 8)}`,
         id,
-        i,
-        monthNames[ws.getUTCMonth()],
-        `${fmt(ws)}~${fmt(we)}`,
-        ws.toISOString().slice(0, 10),
-        we.toISOString().slice(0, 10),
-        countdown,
-        phase,
-        defaultWeekStage(phase, i, prepCount),
+        wk.orderIndex,
+        wk.monthLabel,
+        wk.dateRange,
+        wk.startDate,
+        wk.endDate,
+        wk.countdownLabel,
+        wk.phase,
+        wk.stage,
       );
     }
 
-    const defaultTeams: Array<{ name: string; color: TeamColor }> = [
-      { name: "議程企劃組", color: "violet" },
-      { name: "行銷設計組", color: "rose" },
-      { name: "場務志工組", color: "mint" },
-    ];
+    const isCtfOrSecurity = /ctf|資安|出題|靶機|攻防/i.test(`${input.name} ${input.subtitle ?? ""} ${brief}`);
+    const defaultTeams: Array<{ name: string; color: TeamColor }> = isCtfOrSecurity
+      ? [
+          { name: "出題組", color: "violet" },
+          { name: "Infra 組", color: "sky" },
+          { name: "行政與廠商公關組", color: "rose" },
+          { name: "各校社團與資格審核組", color: "mint" },
+        ]
+      : [
+          { name: "議程企劃組", color: "violet" },
+          { name: "行銷設計組", color: "rose" },
+          { name: "場務志工組", color: "mint" },
+        ];
     const insertTeam = this.db.prepare(
       `INSERT INTO teams (id, campaign_id, name, lead, color, target_headcount, order_index)
        VALUES (?, ?, ?, '', ?, 5, ?)`,
@@ -1626,9 +1664,14 @@ export class CampaignStore {
       teamNames: defaultTeams.map((t) => t.name),
     });
 
+    const dateDesc = formatCampaignDateLabel({
+      eventDate: input.eventDate,
+      dateTentative,
+      tentativeNote,
+    });
     const onboardingWelcome = brief
-      ? `歡迎開啟新專案「**${input.name.trim()}**」！我已讀到你的初步構想：「${brief}」，並先幫你策展了匹配的**靈感借鏡**活動案例。\n\n接下來想請你跟我聊聊：\n1. **預計參與人數與核心受眾**是誰？\n2. 活動當天有沒有**特別環節**（例如工作坊、市集攤位、Panel 與談、黑客松發表）？\n3. 有沒有已知的**死線或撞期時段**？\n\n直接回覆我，我就會為你量身設定專案性質、組別分工與靈感借鏡方向！`
-      : `歡迎開啟新專案「**${input.name.trim()}**」（活動日 ${input.eventDate}）！\n\n在開始細排之前，先跟我聊聊這場活動主要想做什麼吧：\n- **活動形式與規模**（例如：百人技術論壇、校園黑客松、品牌體驗展、音樂市集…）\n- **最想達成的核心體驗或目標**\n\n告訴我之後，我會直接幫你規劃專案定位、配置適合的組別與節奏，並在「**靈感借鏡**」頁面整理國內外相似活動的亮點與避坑提醒！`;
+      ? `歡迎開啟新專案「**${input.name.trim()}**」（${dateDesc} · 已展開 **倒數 ${timeline.prepCount} 週** 長程時程）！我已讀到你的初步構想：「${brief}」，並先幫你策展了匹配的**靈感借鏡**活動案例。\n\n接下來想請你跟我聊聊：\n1. **預計參與人數與核心受眾**是誰？\n2. 活動形式或每月里程碑有沒有特別規劃？\n3. 有沒有已知的**死線或撞期時段**？\n\n直接回覆我，我就會為你量身設定專案性質、組別分工與靈感借鏡方向！`
+      : `歡迎開啟新專案「**${input.name.trim()}**」（${dateDesc} · 已展開 **倒數 ${timeline.prepCount} 週** 時程）！\n\n在開始細排之前，先跟我聊聊這場活動主要想做什麼吧：\n- **活動形式與規模**（例如：跨校資安競賽、百人技術論壇、校園黑客松、品牌體驗展…）\n- **最想達成的核心體驗或各月目標**\n\n告訴我之後，我會直接幫你規劃專案定位、配置適合的組別與節奏，並在「**靈感借鏡**」頁面整理國內外相似活動的亮點與避坑提醒！`;
 
     this.db
       .prepare(
@@ -1640,12 +1683,195 @@ export class CampaignStore {
     return this.getSnapshot(id);
   }
 
+  /**
+   * Expands, shifts, or re-anchors an existing campaign's weekly timeline (up to 52 prep weeks + post weeks)
+   * without losing any existing todos, cells, milestones, clashing event flags, or memos.
+   */
+  rescheduleCampaignTimeline(
+    campaignId: string,
+    input: {
+      eventDate?: string;
+      startDate?: string;
+      prepWeeks?: number;
+      postWeeks?: number;
+      dateTentative?: boolean;
+      tentativeNote?: string;
+    },
+  ): CampaignSnapshot {
+    const snap = this.getSnapshot(campaignId);
+    const cur = snap.campaign;
+    const now = new Date().toISOString();
+    const nextEventDate = input.eventDate?.trim() || cur.eventDate;
+    const nextTentative = input.dateTentative !== undefined ? input.dateTentative : cur.dateTentative;
+    const nextTentativeNote = input.tentativeNote !== undefined ? input.tentativeNote.trim() : cur.tentativeNote;
+    const nextPostWeeks = input.postWeeks !== undefined ? input.postWeeks : cur.postWeeks;
+
+    const timeline = buildWeeklyTimelineDefs({
+      eventDate: nextEventDate,
+      startDate: input.startDate,
+      prepWeeks: input.prepWeeks,
+      postWeeks: nextPostWeeks,
+      dateTentative: nextTentative,
+    });
+
+    const oldWeeks = [...snap.weeks].sort((a, b) => a.orderIndex - b.orderIndex);
+    const claimedOldIds = new Set<string>();
+    const matchedOldByNewIdx = new Map<number, CampaignWeek>();
+
+    // Pass 1: Match by calendar week proximity (within ±4 days) so dated tasks/conflicts stay on their real calendar week
+    timeline.weeks.forEach((def, newIdx) => {
+      const targetMs = Date.parse(`${def.startDate}T00:00:00Z`);
+      let bestOld: CampaignWeek | null = null;
+      let bestDiff = Infinity;
+      for (const ow of oldWeeks) {
+        if (claimedOldIds.has(ow.id) || !ow.startDate) continue;
+        const diff = Math.abs(Date.parse(`${ow.startDate}T00:00:00Z`) - targetMs);
+        if (diff <= 4 * 86400_000 && diff < bestDiff) {
+          bestDiff = diff;
+          bestOld = ow;
+        }
+      }
+      if (bestOld) {
+        claimedOldIds.add(bestOld.id);
+        matchedOldByNewIdx.set(newIdx, bestOld);
+      }
+    });
+
+    // Pass 2: Match event / post weeks if the event date shifted beyond ±4 days
+    const newEventIdx = timeline.weeks.findIndex((w) => w.phase === "event");
+    const oldEventWeek = oldWeeks.find((w) => w.phase === "event" && !claimedOldIds.has(w.id));
+    if (newEventIdx >= 0 && oldEventWeek && !matchedOldByNewIdx.has(newEventIdx)) {
+      claimedOldIds.add(oldEventWeek.id);
+      matchedOldByNewIdx.set(newEventIdx, oldEventWeek);
+    }
+
+    this.db.exec("BEGIN");
+    try {
+      this.db
+        .prepare(
+          `UPDATE campaigns
+           SET event_date = ?, start_date = ?, post_weeks = ?, date_tentative = ?, tentative_note = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          nextEventDate,
+          timeline.startIso,
+          timeline.postWeeks,
+          nextTentative ? 1 : 0,
+          nextTentativeNote,
+          now,
+          campaignId,
+        );
+
+      const updateWeekStmt = this.db.prepare(
+        `UPDATE weeks
+         SET order_index = ?, month_label = ?, date_range = ?, start_date = ?, end_date = ?, countdown_label = ?, phase = ?, stage = ?
+         WHERE id = ?`,
+      );
+      const insertWeekStmt = this.db.prepare(
+        `INSERT INTO weeks (id, campaign_id, order_index, month_label, date_range, start_date, end_date, countdown_label, phase, stage, major_events_json, memo)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '')`,
+      );
+
+      const newWeekIds: string[] = [];
+      timeline.weeks.forEach((def, idx) => {
+        const matched = matchedOldByNewIdx.get(idx);
+        if (matched) {
+          updateWeekStmt.run(
+            def.orderIndex,
+            def.monthLabel,
+            def.dateRange,
+            def.startDate,
+            def.endDate,
+            def.countdownLabel,
+            def.phase,
+            def.stage,
+            matched.id,
+          );
+          newWeekIds.push(matched.id);
+        } else {
+          const freshId = `wk-${randomUUID().slice(0, 8)}`;
+          insertWeekStmt.run(
+            freshId,
+            campaignId,
+            def.orderIndex,
+            def.monthLabel,
+            def.dateRange,
+            def.startDate,
+            def.endDate,
+            def.countdownLabel,
+            def.phase,
+            def.stage,
+          );
+          newWeekIds.push(freshId);
+        }
+      });
+
+      // Preserve any todos, cells, events, and memos from retired weeks before deleting them
+      for (const ow of oldWeeks) {
+        if (claimedOldIds.has(ow.id)) continue;
+        const owMs = ow.startDate ? Date.parse(`${ow.startDate}T00:00:00Z`) : 0;
+        const firstMs = Date.parse(`${timeline.weeks[0].startDate}T00:00:00Z`);
+        const fallbackWeekId = owMs && owMs < firstMs ? newWeekIds[0] : newWeekIds[newWeekIds.length - 1];
+
+        this.db.prepare("UPDATE todos SET week_id = ? WHERE week_id = ?").run(fallbackWeekId, ow.id);
+
+        const orphanCells = snap.cells.filter((c) => c.weekId === ow.id && (c.weeklyFocus.trim() || c.crossTeam.trim()));
+        for (const oc of orphanCells) {
+          const destExists = this.db
+            .prepare("SELECT weekly_focus FROM cells WHERE week_id = ? AND team_id = ?")
+            .get(fallbackWeekId, oc.teamId) as { weekly_focus?: string } | undefined;
+          if (!destExists || !destExists.weekly_focus?.trim()) {
+            this.upsertCell({
+              weekId: fallbackWeekId,
+              teamId: oc.teamId,
+              stage: oc.stage,
+              weeklyFocus: oc.weeklyFocus,
+              crossTeam: oc.crossTeam,
+            });
+          }
+        }
+
+        if (ow.majorEvents.length > 0 || ow.memo.trim()) {
+          const destRow = this.db
+            .prepare("SELECT major_events_json, memo FROM weeks WHERE id = ?")
+            .get(fallbackWeekId) as { major_events_json?: string; memo?: string } | undefined;
+          const destEvents = safeJsonParse<WeekEventItem[]>(destRow?.major_events_json, []);
+          const mergedEvents = [...destEvents, ...ow.majorEvents].slice(0, 12);
+          const mergedMemo = [destRow?.memo?.trim(), ow.memo.trim()].filter(Boolean).join("；").slice(0, 300);
+          this.db
+            .prepare("UPDATE weeks SET major_events_json = ?, memo = ? WHERE id = ?")
+            .run(JSON.stringify(mergedEvents), mergedMemo, fallbackWeekId);
+        }
+
+        this.db.prepare("DELETE FROM weeks WHERE id = ?").run(ow.id);
+      }
+
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+
+    return this.getSnapshot(campaignId);
+  }
+
   updateCampaignMeta(
     campaignId: string,
     patch: Partial<
       Pick<
         CampaignMeta,
-        "name" | "subtitle" | "brief" | "eventDate" | "pacing" | "mainGoal" | "monthlyGoals" | "sheetUrl" | "slidesUrl"
+        | "name"
+        | "subtitle"
+        | "brief"
+        | "eventDate"
+        | "dateTentative"
+        | "tentativeNote"
+        | "pacing"
+        | "mainGoal"
+        | "monthlyGoals"
+        | "sheetUrl"
+        | "slidesUrl"
       >
     >,
   ): CampaignMeta {
@@ -1658,6 +1884,8 @@ export class CampaignStore {
       ...(patch.subtitle !== undefined ? { subtitle: patch.subtitle.trim() } : {}),
       ...(patch.brief !== undefined ? { brief: patch.brief.trim() } : {}),
       ...(patch.eventDate !== undefined ? { eventDate: patch.eventDate.trim() || cur.eventDate } : {}),
+      ...(patch.dateTentative !== undefined ? { dateTentative: patch.dateTentative } : {}),
+      ...(patch.tentativeNote !== undefined ? { tentativeNote: patch.tentativeNote.trim() } : {}),
       ...(patch.pacing !== undefined ? { pacing: patch.pacing } : {}),
       ...(patch.mainGoal !== undefined ? { mainGoal: patch.mainGoal } : {}),
       ...(patch.monthlyGoals !== undefined ? { monthlyGoals: patch.monthlyGoals } : {}),
@@ -1669,7 +1897,7 @@ export class CampaignStore {
     this.db
       .prepare(
         `UPDATE campaigns
-         SET name = ?, subtitle = ?, brief = ?, event_date = ?, pacing = ?, main_goal = ?, monthly_goals_json = ?, sheet_url = ?, slides_url = ?, updated_at = ?
+         SET name = ?, subtitle = ?, brief = ?, event_date = ?, date_tentative = ?, tentative_note = ?, pacing = ?, main_goal = ?, monthly_goals_json = ?, sheet_url = ?, slides_url = ?, updated_at = ?
          WHERE id = ?`,
       )
       .run(
@@ -1677,6 +1905,8 @@ export class CampaignStore {
         next.subtitle,
         next.brief,
         next.eventDate,
+        next.dateTentative ? 1 : 0,
+        next.tentativeNote,
         next.pacing,
         next.mainGoal,
         JSON.stringify(next.monthlyGoals),
