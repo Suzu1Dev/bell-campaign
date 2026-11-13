@@ -12,8 +12,17 @@ import {
   FILE_CATEGORIES,
   HANDBOOK_TEMPLATES,
   PACING_LEVELS,
+  PARTNER_KINDS,
+  PARTNER_STATUSES,
   TEAM_COLORS,
+  type MeetingDocSource,
 } from "../shared/types.js";
+import {
+  detectDocSourceFromUrl,
+  meetingToGoogleDocHtml,
+  meetingToHackMd,
+  parseMeetingDoc,
+} from "../shared/docs.js";
 import {
   SUITE_LIMITS,
   SUITE_OBJECT_ID,
@@ -32,6 +41,7 @@ import {
 } from "../shared/sheets.js";
 import {
   buildBuiltinHandbook,
+  curateInspirationsWithAI,
   generateAutoSchedulePreview,
   generateHandbookWithAI,
   replyCampaignBot,
@@ -80,12 +90,63 @@ function parseGoogleSpreadsheetUrl(rawUrl: string): { sheetId: string; gid: stri
   return { sheetId: match[1], gid };
 }
 
+export type DocFetcher = (docUrl: string, signal: AbortSignal) => Promise<{ text: string; source: MeetingDocSource }>;
+
+function resolveSafeDocExportUrl(rawUrl: string): { fetchUrl: string; source: MeetingDocSource } {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch {
+    throw new AppError(400, "請輸入有效的 Google 文件或 HackMD 網址。");
+  }
+  if (parsed.protocol !== "https:") {
+    throw new AppError(400, "僅支援 https:// 安全網址。");
+  }
+  if (parsed.hostname === "docs.google.com") {
+    const m = /^\/document\/d\/([A-Za-z0-9_-]{10,120})/.exec(parsed.pathname);
+    if (!m) throw new AppError(400, "無法從網址識別 Google 文件 ID。");
+    return {
+      fetchUrl: `https://docs.google.com/document/d/${encodeURIComponent(m[1])}/export?format=txt`,
+      source: "gdoc",
+    };
+  }
+  if (parsed.hostname === "hackmd.io") {
+    const cleanPath = parsed.pathname.replace(/\/+(edit|view|both|download)?$/i, "");
+    if (!cleanPath || cleanPath === "/" || !/^\/(?:@[A-Za-z0-9_.-]+\/[A-Za-z0-9_-]+|[A-Za-z0-9_-]{6,80})$/.test(cleanPath)) {
+      throw new AppError(400, "無法識別 HackMD 筆記路徑，請貼上公開筆記網址。");
+    }
+    return {
+      fetchUrl: `https://hackmd.io${cleanPath}/download`,
+      source: "hackmd",
+    };
+  }
+  throw new AppError(400, "目前僅支援 docs.google.com（Google 文件）或 hackmd.io 網址直接匯入，其他來源請貼上 Markdown／文字內容。");
+}
+
+export const defaultDocFetcher: DocFetcher = async (docUrl, signal) => {
+  const { fetchUrl, source } = resolveSafeDocExportUrl(docUrl);
+  const timeout = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
+  const response = await fetch(fetchUrl, { signal: timeout, redirect: "follow" });
+  if (!response.ok) {
+    throw new AppError(502, `無法讀取雲端文件（HTTP ${response.status}），請確認 Google 文件／HackMD 設為「知道連結的任何人可檢視」或直接貼上內容。`);
+  }
+  const text = await response.text();
+  if (text.length > 1_000_000) {
+    throw new AppError(413, "文件內容超過 1MB 上限。");
+  }
+  if (/<!doctype html>/i.test(text.slice(0, 200)) && /accounts\.google\.com|hackmd\.io\/login/i.test(text.slice(0, 4000))) {
+    throw new AppError(422, "此雲端文件需要登入權限，請開啟公開檢視權限或直接複製貼上內容。");
+  }
+  return { text, source };
+};
+
 export interface CreateAppOptions {
   store: CampaignStore;
   allowedOrigins?: string[];
   suiteLinks?: SuiteLinks;
   aiRunner?: JsonPromptRunner;
   sheetCsvFetcher?: SheetCsvFetcher;
+  docFetcher?: DocFetcher;
   distDir?: string;
 }
 
@@ -100,6 +161,7 @@ const createCampaignSchema = z
   .object({
     name: z.string().trim().min(1).max(80),
     subtitle: z.string().trim().max(120).optional(),
+    brief: z.string().trim().max(500).optional(),
     eventDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     postWeeks: z.number().int().min(0).max(4).optional(),
   })
@@ -109,6 +171,7 @@ const patchCampaignSchema = z
   .object({
     name: z.string().trim().min(1).max(80).optional(),
     subtitle: z.string().trim().max(140).optional(),
+    brief: z.string().max(1000).optional(),
     eventDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
     pacing: z.enum(PACING_LEVELS).optional(),
     mainGoal: z.string().max(1000).optional(),
@@ -253,6 +316,49 @@ const saveMeetingSchema = z
     arrangements: z.string().max(6000),
     precautions: z.string().max(6000),
     decisions: z.string().max(6000),
+    docUrl: z.string().max(500).optional(),
+    docSource: z.enum(["", "gdoc", "hackmd", "markdown"]).optional(),
+  })
+  .strict();
+
+const importMeetingDocSchema = z
+  .object({
+    meetingId: z.string().trim().optional(),
+    docUrl: z.string().max(500).optional(),
+    rawContent: z.string().max(500_000).optional(),
+  })
+  .strict();
+
+const tempStaffTaskSchema = z
+  .object({
+    id: z.string().trim().min(1).max(64),
+    title: z.string().trim().min(1).max(160),
+    done: z.boolean(),
+  })
+  .strict();
+
+const savePartnerSchema = z
+  .object({
+    id: z.string().trim().optional(),
+    kind: z.enum(PARTNER_KINDS),
+    name: z.string().trim().min(1).max(80),
+    organization: z.string().max(120).optional(),
+    roleOrTopic: z.string().max(240).optional(),
+    contact: z.string().max(160).optional(),
+    teamId: z.string().trim().nullable().optional(),
+    status: z.enum(PARTNER_STATUSES).optional(),
+    shiftOrFee: z.string().max(160).optional(),
+    notes: z.string().max(2000).optional(),
+    tasks: z.array(tempStaffTaskSchema).max(30).optional(),
+  })
+  .strict();
+
+const patchPartnerSchema = z
+  .object({
+    status: z.enum(PARTNER_STATUSES).optional(),
+    teamId: z.string().trim().nullable().optional(),
+    notes: z.string().max(2000).optional(),
+    tasks: z.array(tempStaffTaskSchema).max(30).optional(),
   })
   .strict();
 
@@ -260,6 +366,7 @@ const patchFormSchema = z
   .object({
     title: z.string().trim().min(1).max(120).optional(),
     sourceUrl: z.string().max(500).optional(),
+    sheetSyncUrl: z.string().max(500).optional(),
     status: z.enum(["open", "closed"]).optional(),
     description: z.string().max(500).optional(),
   })
@@ -362,6 +469,7 @@ export function createApp(options: CreateAppOptions) {
     suiteLinks = {},
     aiRunner,
     sheetCsvFetcher = defaultSheetCsvFetcher,
+    docFetcher = defaultDocFetcher,
     distDir = resolve(process.cwd(), "dist"),
   } = options;
 
@@ -702,7 +810,7 @@ export function createApp(options: CreateAppOptions) {
     res.json(store.getSnapshot(campaignId));
   });
 
-  // ── Meetings ─────────────────────────────────────────────────────────────
+  // ── Meetings & Bidirectional Google Docs / HackMD Sync ───────────────────
   app.post("/api/campaigns/:id/meetings", (req, res) => {
     const parsed = saveMeetingSchema.safeParse(req.body);
     if (!parsed.success) throw new AppError(400, "請輸入會議名稱與時間。");
@@ -710,8 +818,128 @@ export function createApp(options: CreateAppOptions) {
     res.status(201).json(store.getSnapshot(req.params.id));
   });
 
+  app.post("/api/campaigns/:id/meetings/import-doc", async (req, res) => {
+    const parsed = importMeetingDocSchema.safeParse(req.body);
+    if (!parsed.success) throw new AppError(400, "匯入文件參數格式不正確。");
+
+    const docUrl = (parsed.data.docUrl ?? "").trim();
+    let rawContent = (parsed.data.rawContent ?? "").trim();
+    let docSource: MeetingDocSource = detectDocSourceFromUrl(docUrl);
+
+    if (!rawContent && !docUrl) {
+      throw new AppError(400, "請貼上 Google 文件／HackMD 網址，或貼上文件內容。");
+    }
+
+    if (!rawContent && docUrl) {
+      const controller = new AbortController();
+      const onClose = () => {
+        if (!res.writableEnded) controller.abort();
+      };
+      res.on("close", onClose);
+      try {
+        const fetched = await docFetcher(docUrl, controller.signal);
+        rawContent = fetched.text;
+        docSource = fetched.source;
+      } finally {
+        res.off("close", onClose);
+      }
+    }
+
+    const fields = parseMeetingDoc(rawContent);
+    const saved = store.saveMeeting(req.params.id, {
+      ...(parsed.data.meetingId ? { id: parsed.data.meetingId } : {}),
+      ...fields,
+      ...(docUrl ? { docUrl, docSource } : { docSource: docSource || "markdown" }),
+    });
+
+    res.status(201).json({
+      meeting: saved,
+      snapshot: store.getSnapshot(req.params.id),
+    });
+  });
+
+  app.get("/api/meetings/:meetingId/export", (req, res) => {
+    const format = req.query.format === "doc" ? "doc" : "md";
+    const { meeting, campaignName } = store.getMeetingById(req.params.meetingId);
+    const safeSlug = meeting.title.replace(/[\\/:*?"<>|\s]+/g, "-").slice(0, 40) || "meeting";
+    if (format === "doc") {
+      const html = meetingToGoogleDocHtml(meeting, campaignName);
+      res.setHeader("Content-Type", "application/msword; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(safeSlug)}.doc"`);
+      res.send(html);
+      return;
+    }
+    const md = meetingToHackMd(meeting, campaignName);
+    res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(safeSlug)}.md"`);
+    res.send(md);
+  });
+
   app.delete("/api/meetings/:meetingId", (req, res) => {
     store.deleteMeeting(req.params.meetingId);
+    const campaignId = typeof req.query.campaignId === "string" ? req.query.campaignId : undefined;
+    res.json(store.getSnapshot(campaignId));
+  });
+
+  // ── Partners (`#/partners`: 講者 · 合作廠商 · 臨時工) ─────────────────────
+  app.post("/api/campaigns/:id/partners", (req, res) => {
+    const parsed = savePartnerSchema.safeParse(req.body);
+    if (!parsed.success) throw new AppError(400, "請輸入合作對象姓名／名稱與分類。");
+    store.savePartner(req.params.id, parsed.data);
+    res.status(201).json(store.getSnapshot(req.params.id));
+  });
+
+  app.patch("/api/partners/:partnerId", (req, res) => {
+    const parsed = patchPartnerSchema.safeParse(req.body);
+    if (!parsed.success) throw new AppError(400, "合作對象狀態更新格式不正確。");
+    store.patchPartner(req.params.partnerId, parsed.data);
+    const campaignId = typeof req.query.campaignId === "string" ? req.query.campaignId : undefined;
+    res.json(store.getSnapshot(campaignId));
+  });
+
+  app.delete("/api/partners/:partnerId", (req, res) => {
+    store.deletePartner(req.params.partnerId);
+    const campaignId = typeof req.query.campaignId === "string" ? req.query.campaignId : undefined;
+    res.json(store.getSnapshot(campaignId));
+  });
+
+  // ── Inspirations (`#/inspirations`: 靈感借鏡) ────────────────────────────
+  app.post("/api/campaigns/:id/inspirations/curate", async (req, res) => {
+    const body = z
+      .object({
+        brief: z.string().max(1000).optional(),
+        focusHint: z.string().max(300).optional(),
+      })
+      .strict()
+      .safeParse(req.body);
+    if (!body.success) throw new AppError(400, "靈感策展條件格式不正確。");
+
+    if (body.data.brief !== undefined) {
+      store.updateCampaignMeta(req.params.id, { brief: body.data.brief });
+    }
+    const snap = store.getSnapshot(req.params.id);
+    const controller = new AbortController();
+    const onClose = () => {
+      if (!res.writableEnded) controller.abort();
+    };
+    res.on("close", onClose);
+    try {
+      const curated = await curateInspirationsWithAI(
+        snap,
+        body.data.focusHint ?? "",
+        snap.settings,
+        controller.signal,
+        aiRunner,
+      );
+      store.replaceInspirations(req.params.id, curated);
+      res.json(store.getSnapshot(req.params.id));
+    } finally {
+      res.off("close", onClose);
+    }
+  });
+
+  app.delete("/api/inspirations/:inspirationId", (req, res) => {
+    store.deleteInspiration(req.params.inspirationId);
     const campaignId = typeof req.query.campaignId === "string" ? req.query.campaignId : undefined;
     res.json(store.getSnapshot(campaignId));
   });
@@ -748,6 +976,41 @@ export function createApp(options: CreateAppOptions) {
     res.json({ importedCount, snapshot: store.getSnapshot(req.params.id) });
   });
 
+  app.post("/api/campaigns/:id/forms/:formId/sync-sheet", async (req, res) => {
+    const body = z
+      .object({ sheetSyncUrl: z.string().max(500).optional() })
+      .strict()
+      .safeParse(req.body);
+    if (!body.success) throw new AppError(400, "試算表連結格式不正確。");
+
+    const snap = store.getSnapshot(req.params.id);
+    const targetForm = snap.forms.find((f) => f.id === req.params.formId);
+    if (!targetForm) throw new AppError(404, "找不到指定的招工表單。");
+
+    const syncUrl = (body.data.sheetSyncUrl ?? targetForm.sheetSyncUrl).trim();
+    if (!syncUrl) throw new AppError(400, "請先貼上招工表單連結的 Google 試算表網址。");
+
+    const { sheetId, gid } = parseGoogleSpreadsheetUrl(syncUrl);
+    const controller = new AbortController();
+    const onClose = () => {
+      if (!res.writableEnded) controller.abort();
+    };
+    res.on("close", onClose);
+    let csvText = "";
+    try {
+      csvText = await sheetCsvFetcher(sheetId, gid, controller.signal);
+    } finally {
+      res.off("close", onClose);
+    }
+
+    const importedCount = store.importFormResponsesCsv(req.params.id, req.params.formId, csvText);
+    store.updateFormMeta(req.params.formId, {
+      sheetSyncUrl: syncUrl,
+      lastSyncedAt: new Date().toISOString(),
+    });
+    res.json({ importedCount, snapshot: store.getSnapshot(req.params.id) });
+  });
+
   // ── Campaign Bot (`#/bot`) ───────────────────────────────────────────────
   app.post("/api/campaigns/:id/bot/chat", async (req, res) => {
     const parsed = botChatSchema.safeParse(req.body);
@@ -778,7 +1041,35 @@ export function createApp(options: CreateAppOptions) {
     const proposal = store.markProposalApplied(parsed.data.messageId, parsed.data.proposalId);
     const p = proposal.payload;
 
-    if (proposal.kind === "adjust_pacing" || proposal.kind === "auto_schedule") {
+    if (proposal.kind === "setup_project_brief") {
+      const brief = String(p.brief ?? "").trim();
+      const mainGoal = String(p.mainGoal ?? brief).trim();
+      store.updateCampaignMeta(campaignId, {
+        ...(brief ? { brief } : {}),
+        ...(mainGoal ? { mainGoal } : {}),
+      });
+      const updatedSnap = store.getSnapshot(campaignId);
+      store.seedInspirationsForCampaign(campaignId, {
+        name: updatedSnap.campaign.name,
+        subtitle: updatedSnap.campaign.subtitle,
+        brief: updatedSnap.campaign.brief,
+        mainGoal: updatedSnap.campaign.mainGoal,
+        teamNames: updatedSnap.teams.map((t) => t.name),
+      });
+    } else if (proposal.kind === "add_partner") {
+      const kind = (PARTNER_KINDS as readonly string[]).includes(String(p.kind))
+        ? (String(p.kind) as typeof PARTNER_KINDS[number])
+        : "speaker";
+      store.savePartner(campaignId, {
+        kind,
+        name: String(p.name || "合作夥伴").trim(),
+        organization: String(p.organization ?? ""),
+        roleOrTopic: String(p.roleOrTopic ?? ""),
+        shiftOrFee: String(p.shiftOrFee ?? ""),
+        teamId: snap.teams[0]?.id ?? null,
+        status: "contacting",
+      });
+    } else if (proposal.kind === "adjust_pacing" || proposal.kind === "auto_schedule") {
       const pacing = (PACING_LEVELS as readonly string[]).includes(String(p.pacing))
         ? (String(p.pacing) as typeof PACING_LEVELS[number])
         : "balanced";

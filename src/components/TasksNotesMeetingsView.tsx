@@ -1,17 +1,27 @@
 import { useMemo, useState } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
 import {
+  ArrowLeftRight,
   ArrowUpRight,
   Calendar,
   CheckCircle2,
   Circle,
+  Copy,
+  Download,
+  ExternalLink,
+  FileText,
   Pin,
   Plus,
+  RefreshCw,
   Sparkles,
   Trash2,
+  Upload,
+  X,
 } from "lucide-react";
 import type { CampaignMeeting, CampaignNote, CampaignSnapshot } from "../../shared/types";
 import { explainDraftHref, personalTaskHref, type SuiteLinks } from "../../shared/suite";
 import { computeCampaignMetrics } from "../../shared/sheets";
+import { detectDocSourceFromUrl, meetingToGoogleDocHtml, meetingToHackMd } from "../../shared/docs";
 import { apiWrite } from "../lib/api";
 
 // ── 1. Tasks & Team Progress Tracking (`#/tasks`) ──────────────────────────
@@ -303,7 +313,7 @@ export function TasksView({
   );
 }
 
-// ── 2. Meetings Workspace (`#/meetings`) ───────────────────────────────────
+// ── 2. Meetings Workspace (`#/meetings`) + Bidirectional Google Docs & HackMD ─
 export function MeetingsView({
   snapshot,
   onSnapshot,
@@ -326,6 +336,8 @@ export function MeetingsView({
           arrangements: current.arrangements,
           precautions: current.precautions,
           decisions: current.decisions,
+          docUrl: current.docUrl ?? "",
+          docSource: current.docSource ?? "",
         }
       : {
           title: "",
@@ -335,8 +347,18 @@ export function MeetingsView({
           arrangements: "",
           precautions: "",
           decisions: "",
+          docUrl: "",
+          docSource: "",
         },
   );
+
+  // Bidirectional Cloud Sync Dialog state
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [syncTab, setSyncTab] = useState<"import" | "export">("import");
+  const [importTarget, setImportTarget] = useState<"new" | "overwrite">("new");
+  const [importUrl, setImportUrl] = useState("");
+  const [importText, setImportText] = useState("");
+  const [syncBusy, setSyncBusy] = useState(false);
 
   function selectMeeting(m: CampaignMeeting | null) {
     if (!m) {
@@ -349,6 +371,8 @@ export function MeetingsView({
         arrangements: "",
         precautions: "",
         decisions: "",
+        docUrl: "",
+        docSource: "",
       });
       return;
     }
@@ -361,6 +385,8 @@ export function MeetingsView({
       arrangements: m.arrangements,
       precautions: m.precautions,
       decisions: m.decisions,
+      docUrl: m.docUrl ?? "",
+      docSource: m.docSource ?? "",
     });
   }
 
@@ -369,23 +395,107 @@ export function MeetingsView({
       notify("請輸入會議標題");
       return;
     }
-    const next = await apiWrite<CampaignSnapshot>(
-      `/api/campaigns/${snapshot.campaign.id}/meetings`,
-      "POST",
-      {
-        ...(selectedId !== "new" ? { id: selectedId } : {}),
-        ...draft,
-      },
-    );
-    onSnapshot(next);
-    if (selectedId === "new" && next.meetings[0]) {
-      setSelectedId(next.meetings[0].id);
+    try {
+      const next = await apiWrite<CampaignSnapshot>(
+        `/api/campaigns/${snapshot.campaign.id}/meetings`,
+        "POST",
+        {
+          ...(selectedId !== "new" ? { id: selectedId } : {}),
+          ...draft,
+          docSource: draft.docUrl ? detectDocSourceFromUrl(draft.docUrl) : draft.docSource,
+        },
+      );
+      onSnapshot(next);
+      if (selectedId === "new" && next.meetings[0]) {
+        setSelectedId(next.meetings[0].id);
+      }
+      notify("已儲存會議記錄");
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "儲存失敗");
     }
-    notify("已儲存會議記錄");
+  }
+
+  async function runDocImport(opts: { docUrl?: string; rawContent?: string; targetMeetingId?: string }) {
+    setSyncBusy(true);
+    try {
+      const res = await apiWrite<{ meeting: CampaignMeeting; snapshot: CampaignSnapshot }>(
+        `/api/campaigns/${snapshot.campaign.id}/meetings/import-doc`,
+        "POST",
+        {
+          ...(opts.targetMeetingId ? { meetingId: opts.targetMeetingId } : {}),
+          ...(opts.docUrl ? { docUrl: opts.docUrl } : {}),
+          ...(opts.rawContent ? { rawContent: opts.rawContent } : {}),
+        },
+      );
+      onSnapshot(res.snapshot);
+      selectMeeting(res.meeting);
+      setImportUrl("");
+      setImportText("");
+      setSyncOpen(false);
+      notify(`已同步「${res.meeting.title}」內容至會議記錄`);
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "匯入雲端文件失敗");
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+
+  async function copyRichGoogleDoc() {
+    const safeDraft = {
+      ...draft,
+      title: draft.title.trim() || "未命名會議記錄",
+    };
+    const html = meetingToGoogleDocHtml(safeDraft, snapshot.campaign.name);
+    const md = meetingToHackMd(safeDraft, snapshot.campaign.name);
+    try {
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/html": new Blob([html], { type: "text/html" }),
+            "text/plain": new Blob([md], { type: "text/plain" }),
+          }),
+        ]);
+      } else {
+        await navigator.clipboard.writeText(md);
+      }
+      notify("已複製 Google 文件富文本格式，可直接 ⌘V 貼入 Google 文件保留標題與清單");
+    } catch {
+      await navigator.clipboard.writeText(md);
+      notify("已複製結構化會議內容");
+    }
+  }
+
+  async function copyHackMd() {
+    const safeDraft = {
+      ...draft,
+      title: draft.title.trim() || "未命名會議記錄",
+    };
+    await navigator.clipboard.writeText(meetingToHackMd(safeDraft, snapshot.campaign.name));
+    notify("已複製 HackMD Markdown（含 YAML 標籤與完整章節）");
+  }
+
+  function downloadDraftFile(format: "md" | "doc") {
+    if (selectedId !== "new") {
+      window.location.href = `/api/meetings/${encodeURIComponent(selectedId)}/export?format=${format}`;
+      return;
+    }
+    const safeDraft = { ...draft, title: draft.title.trim() || "meeting-notes" };
+    const content =
+      format === "doc"
+        ? meetingToGoogleDocHtml(safeDraft, snapshot.campaign.name)
+        : meetingToHackMd(safeDraft, snapshot.campaign.name);
+    const mime = format === "doc" ? "application/msword;charset=utf-8" : "text/markdown;charset=utf-8";
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${safeDraft.title}.${format}`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   async function convertDecisionToTodo() {
-    const text = draft.decisions.trim().split(/\n+/)[0]?.trim();
+    const text = draft.decisions.trim().split(/\n+/)[0]?.replace(/^[-*•[\]\sx]+/i, "").trim();
     const teamId = snapshot.teams[0]?.id;
     if (!text || !teamId) {
       notify("請先在決議欄輸入內容");
@@ -400,39 +510,147 @@ export function MeetingsView({
     notify("已將會議決議轉為高優先待辦");
   }
 
+  const docSourceLabel =
+    draft.docSource === "gdoc" || draft.docUrl.includes("docs.google.com")
+      ? "Google 文件"
+      : draft.docSource === "hackmd" || draft.docUrl.includes("hackmd.io")
+        ? "HackMD"
+        : "雲端文件";
+
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 16, alignItems: "start" }}>
+    <div className="meetings-grid">
       <div className="card" style={{ padding: 14, display: "flex", flexDirection: "column", gap: 8 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
           <strong style={{ fontSize: 14 }}>會議列表 ({snapshot.meetings.length})</strong>
-          <button type="button" className="btn btn-primary btn-sm" onClick={() => selectMeeting(null)}>
-            <Plus size={13} />
-            <span>新增會議</span>
-          </button>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => {
+                setSyncTab("import");
+                setImportTarget("new");
+                setSyncOpen(true);
+              }}
+              title="從 Google 文件或 HackMD 匯入新會議"
+            >
+              <Upload size={12} />
+              <span>匯入</span>
+            </button>
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => selectMeeting(null)}>
+              <Plus size={13} />
+              <span>新增</span>
+            </button>
+          </div>
         </div>
 
-        {snapshot.meetings.map((m) => (
-          <div
-            key={m.id}
-            onClick={() => selectMeeting(m)}
-            style={{
-              padding: "10px 12px",
-              borderRadius: "var(--radius-sm)",
-              border: `1px solid ${selectedId === m.id ? "var(--campaign)" : "var(--line)"}`,
-              background: selectedId === m.id ? "var(--campaign-tint)" : "var(--panel)",
-              cursor: "pointer",
-            }}
-          >
-            <div style={{ fontWeight: 600, fontSize: 13.5 }}>{m.title}</div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-3)", marginTop: 4 }}>
-              <Calendar size={12} />
-              <span className="tabular">{m.meetingDate}</span>
+        {snapshot.meetings.map((m) => {
+          const srcTag =
+            m.docSource === "gdoc"
+              ? "Google 文件"
+              : m.docSource === "hackmd"
+                ? "HackMD"
+                : "";
+          return (
+            <div
+              key={m.id}
+              onClick={() => selectMeeting(m)}
+              style={{
+                padding: "10px 12px",
+                borderRadius: "var(--radius-sm)",
+                border: `1px solid ${selectedId === m.id ? "var(--campaign)" : "var(--line)"}`,
+                background: selectedId === m.id ? "var(--campaign-tint)" : "var(--panel)",
+                cursor: "pointer",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 6 }}>
+                <div style={{ fontWeight: 600, fontSize: 13.5 }}>{m.title}</div>
+                {srcTag && (
+                  <span className="pill" style={{ height: 19, fontSize: 11, padding: "0 6px" }}>
+                    {srcTag}
+                  </span>
+                )}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-3)", marginTop: 4 }}>
+                <Calendar size={12} />
+                <span className="tabular">{m.meetingDate}</span>
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
-      <div className="card" style={{ padding: 18, display: "flex", flexDirection: "column", gap: 12, gridColumn: "span 1" }}>
+      <div className="card" style={{ padding: 18, display: "flex", flexDirection: "column", gap: 12 }}>
+        {/* Bidirectional Google Docs & HackMD Studio Strip */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            flexWrap: "wrap",
+            padding: "10px 12px",
+            borderRadius: "var(--radius-sm)",
+            background: "var(--panel)",
+            border: "1px solid var(--line)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            {draft.docUrl ? (
+              <>
+                <a
+                  href={draft.docUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="pill pill-ok"
+                  title="開啟綁定的雲端會議文件"
+                >
+                  <FileText size={12} />
+                  <span>已連結 {docSourceLabel}</span>
+                  <ExternalLink size={11} />
+                </a>
+                {selectedId !== "new" && (
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={syncBusy}
+                    onClick={() => void runDocImport({ docUrl: draft.docUrl, targetMeetingId: selectedId })}
+                  >
+                    <RefreshCw size={12} />
+                    <span>{syncBusy ? "同步中…" : "從雲端拉取更新"}</span>
+                  </button>
+                )}
+              </>
+            ) : (
+              <span style={{ fontSize: 12.5, color: "var(--text-2)" }}>
+                支援 <strong>Google 文件</strong> 與 <strong>HackMD</strong> 雙向匯入／匯出（自動對應大綱、議程、注意事項與決議）
+              </span>
+            )}
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            <button type="button" className="btn btn-sm" onClick={() => void copyRichGoogleDoc()}>
+              <Copy size={12} />
+              <span>直貼 Google 文件</span>
+            </button>
+            <button type="button" className="btn btn-sm" onClick={() => void copyHackMd()}>
+              <Copy size={12} />
+              <span>複製 HackMD</span>
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => {
+                setSyncTab("import");
+                setImportTarget(selectedId !== "new" ? "overwrite" : "new");
+                setSyncOpen(true);
+              }}
+            >
+              <ArrowLeftRight size={12} />
+              <span>雙向匯入／匯出</span>
+            </button>
+          </div>
+        </div>
+
         <div style={{ display: "grid", gridTemplateColumns: "1fr 180px", gap: 10 }}>
           <div>
             <label className="field-label">會議名稱</label>
@@ -534,6 +752,277 @@ export function MeetingsView({
           </button>
         </div>
       </div>
+
+      {/* ── Bidirectional Google Docs & HackMD Sync Modal ────────────────── */}
+      <Dialog.Root open={syncOpen} onOpenChange={setSyncOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content is-wide">
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <Dialog.Title style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>
+                    會議記錄雙向匯入／匯出（Google 文件 · HackMD）
+                  </Dialog.Title>
+                  <Dialog.Description style={{ margin: "3px 0 0", fontSize: 13, color: "var(--text-3)" }}>
+                    自動識別標題、開會時間、與會人員、會前大綱、議程安排、注意事項與會議決議，雙向無損互通。
+                  </Dialog.Description>
+                </div>
+                <Dialog.Close asChild>
+                  <button type="button" className="icon-btn" aria-label="關閉">
+                    <X size={15} />
+                  </button>
+                </Dialog.Close>
+              </div>
+
+              <div className="partner-tabs">
+                <button
+                  type="button"
+                  className={`partner-tab-btn ${syncTab === "import" ? "is-active" : ""}`}
+                  onClick={() => setSyncTab("import")}
+                >
+                  <Upload size={13} />
+                  <span>從 Google 文件 ／ HackMD 匯入</span>
+                </button>
+                <button
+                  type="button"
+                  className={`partner-tab-btn ${syncTab === "export" ? "is-active" : ""}`}
+                  onClick={() => setSyncTab("export")}
+                >
+                  <Download size={13} />
+                  <span>匯出至 Google 文件 ／ HackMD 與連結綁定</span>
+                </button>
+              </div>
+
+              {syncTab === "import" ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  {selectedId !== "new" && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 13, color: "var(--text-2)", fontWeight: 500 }}>匯入寫入方式：</span>
+                      <button
+                        type="button"
+                        className={`btn btn-sm ${importTarget === "new" ? "btn-primary" : ""}`}
+                        onClick={() => setImportTarget("new")}
+                      >
+                        建立為新的一筆會議
+                      </button>
+                      <button
+                        type="button"
+                        className={`btn btn-sm ${importTarget === "overwrite" ? "btn-primary" : ""}`}
+                        onClick={() => setImportTarget("overwrite")}
+                      >
+                        覆寫更新目前會議（{draft.title || "未命名"}）
+                      </button>
+                    </div>
+                  )}
+
+                  <div
+                    style={{
+                      padding: 14,
+                      borderRadius: "var(--radius-md)",
+                      background: "var(--panel)",
+                      border: "1px solid var(--line)",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 8,
+                    }}
+                  >
+                    <label className="field-label" style={{ marginBottom: 0 }}>
+                      方式一：貼上公開 Google 文件或 HackMD 筆記網址直接讀取
+                    </label>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <input
+                        className="input"
+                        style={{ flex: "1 1 280px" }}
+                        placeholder="https://docs.google.com/document/d/... 或 https://hackmd.io/@team/note"
+                        value={importUrl}
+                        onChange={(e) => setImportUrl(e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={syncBusy || !importUrl.trim()}
+                        onClick={() =>
+                          void runDocImport({
+                            docUrl: importUrl.trim(),
+                            targetMeetingId: importTarget === "overwrite" && selectedId !== "new" ? selectedId : undefined,
+                          })
+                        }
+                      >
+                        {syncBusy ? "讀取解析中…" : "從網址匯入"}
+                      </button>
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--text-3)" }}>
+                      提示：匯入後會自動綁定此網址，日後點「從雲端拉取更新」即可一鍵同步最新共筆。
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <label className="field-label" style={{ marginBottom: 0 }}>
+                        方式二：上傳 `.md` / `.html` / `.txt` 檔，或直接貼上文件內容（適用私密權限文件）
+                      </label>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <label className="btn btn-sm" style={{ cursor: "pointer" }}>
+                          <Upload size={12} />
+                          <span>選擇本地檔案</span>
+                          <input
+                            type="file"
+                            accept=".md,.markdown,.txt,.html,.htm"
+                            style={{ display: "none" }}
+                            onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if (!file) return;
+                              const text = await file.text();
+                              setImportText(text);
+                              e.target.value = "";
+                            }}
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() =>
+                            setImportText(`---
+title: "倒數 2 週 · 全場流彩排與講者接待共筆"
+tags: [BELL Campaign, 會議記錄]
+---
+
+# 倒數 2 週 · 全場流彩排與講者接待共筆
+- **開會時間**：2026-07-22 20:30
+- **與會組別／人員**：全體組長、音控廠商代表
+
+## 會前大綱
+1. 確認 4 位與談講者最終簡報比例與轉接頭規格
+2. 演練報到尖峰雙通道分流與臨時工站點
+
+## 議程與時間安排
+- 20:30–20:45 各組紅黃綠燈快報
+- 20:45–21:15 分鐘級 Cue 表走位核對
+
+## 會前注意事項與提醒
+- 請行銷組會前先將桌牌印刷出血檔上傳至文件歸檔區
+
+## 會議決議與後續行動
+- 7/25 前收齊所有講者 PDF 備份並完成休息室動線標示`)
+                          }
+                        >
+                          填入 HackMD 範例
+                        </button>
+                      </div>
+                    </div>
+
+                    <textarea
+                      rows={7}
+                      className="textarea"
+                      style={{ fontFamily: "var(--font-mono)", fontSize: 12.5 }}
+                      placeholder="貼上 HackMD Markdown 或從 Google 文件全選複製的文字…"
+                      value={importText}
+                      onChange={(e) => setImportText(e.target.value)}
+                    />
+
+                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                      <button type="button" className="btn" onClick={() => setSyncOpen(false)}>
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={syncBusy || !importText.trim()}
+                        onClick={() =>
+                          void runDocImport({
+                            docUrl: importUrl.trim() || undefined,
+                            rawContent: importText,
+                            targetMeetingId: importTarget === "overwrite" && selectedId !== "new" ? selectedId : undefined,
+                          })
+                        }
+                      >
+                        解析內容並匯入
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
+                    <div className="card" style={{ padding: 16, background: "var(--panel)", display: "flex", flexDirection: "column", gap: 10 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <strong style={{ fontSize: 14.5 }}>匯出至 Google 文件</strong>
+                        <span className="pill">保留 H1/H2 標題與清單</span>
+                      </div>
+                      <p style={{ margin: 0, fontSize: 13, color: "var(--text-2)" }}>
+                        一鍵複製富文本格式後，在空白 Google 文件按 <code>⌘V</code> 即可原樣貼上結構化標題與條列；或下載 <code>.doc</code> 上傳雲端硬碟開啟。
+                      </p>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: "auto" }}>
+                        <button type="button" className="btn btn-primary btn-sm" onClick={() => void copyRichGoogleDoc()}>
+                          <Copy size={12} />
+                          <span>複製富文本直貼 Google 文件</span>
+                        </button>
+                        <button type="button" className="btn btn-sm" onClick={() => downloadDraftFile("doc")}>
+                          <Download size={12} />
+                          <span>下載 .doc 檔</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="card" style={{ padding: 16, background: "var(--panel)", display: "flex", flexDirection: "column", gap: 10 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <strong style={{ fontSize: 14.5 }}>匯出至 HackMD</strong>
+                        <span className="pill">含 YAML 標籤頭</span>
+                      </div>
+                      <p style={{ margin: 0, fontSize: 13, color: "var(--text-2)" }}>
+                        自動生成帶 YAML `title` / `tags` 的標準 HackMD 共筆語法，貼回 HackMD 修改後還可再一鍵同步回來。
+                      </p>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: "auto" }}>
+                        <button type="button" className="btn btn-primary btn-sm" onClick={() => void copyHackMd()}>
+                          <Copy size={12} />
+                          <span>複製 HackMD Markdown</span>
+                        </button>
+                        <button type="button" className="btn btn-sm" onClick={() => downloadDraftFile("md")}>
+                          <Download size={12} />
+                          <span>下載 .md 檔</span>
+                        </button>
+                        <a href="https://hackmd.io/new" target="_blank" rel="noreferrer" className="btn btn-sm">
+                          <span>開新 HackMD</span>
+                          <ExternalLink size={11} />
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="field-label">綁定此會議對應的 Google 文件 ／ HackMD 網址（方便團隊隨時開啟與雙向拉取更新）</label>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <input
+                        className="input"
+                        placeholder="https://docs.google.com/document/d/... 或 https://hackmd.io/..."
+                        value={draft.docUrl}
+                        onChange={(e) =>
+                          setDraft({
+                            ...draft,
+                            docUrl: e.target.value,
+                            docSource: detectDocSourceFromUrl(e.target.value),
+                          })
+                        }
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={async () => {
+                          await saveMeeting();
+                          setSyncOpen(false);
+                        }}
+                      >
+                        儲存連結與會議
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </div>
   );
 }

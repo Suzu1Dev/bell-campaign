@@ -38,7 +38,18 @@ export const SUITE_ROUTES: Record<SuiteAppId, readonly string[]> = {
   personal: ["#/today", "#/tasks", "#/tasks/{id}", "#/events", "#/events/{id}", "#/ideas", "#/ideas/{id}", "#/inbox", "#/inbox/{id}"],
   pr: [],
   reader: ["#/", "#/library", "#/topics", "#/page/{id}"],
-  campaign: ["#/", "#/schedule", "#/tasks", "#/forms", "#/files", "#/meetings", "#/notes", "#/bot"],
+  campaign: [
+    "#/",
+    "#/schedule",
+    "#/tasks",
+    "#/partners",
+    "#/forms",
+    "#/files",
+    "#/meetings",
+    "#/inspirations",
+    "#/notes",
+    "#/bot",
+  ],
 };
 
 export interface SuiteCapability {

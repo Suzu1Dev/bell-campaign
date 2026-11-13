@@ -3,11 +3,13 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   ArrowLeft,
   Bot,
+  Briefcase,
   CalendarRange,
   CheckSquare,
   ChevronsUpDown,
   ClipboardList,
   FolderArchive,
+  Lightbulb,
   Menu,
   Moon,
   NotebookPen,
@@ -33,16 +35,30 @@ import ScheduleView from "./components/ScheduleView";
 import { MeetingsView, NotesView, TasksView } from "./components/TasksNotesMeetingsView";
 import FilesHandbookView from "./components/FilesHandbookView";
 import FormsView from "./components/FormsView";
+import PartnersView from "./components/PartnersView";
+import InspirationsView from "./components/InspirationsView";
 import BotView from "./components/BotView";
 
-type RouteKey = "schedule" | "tasks" | "forms" | "files" | "meetings" | "notes" | "bot" | "handoff";
+type RouteKey =
+  | "schedule"
+  | "tasks"
+  | "partners"
+  | "forms"
+  | "inspirations"
+  | "files"
+  | "meetings"
+  | "notes"
+  | "bot"
+  | "handoff";
 
 const HANDOFF_STORAGE_KEY = "bell.suite.handoff.campaign";
 
 function resolveRouteFromHash(hash: string): RouteKey {
   const path = hash.replace(/^#/, "").split("?")[0] || "/";
   if (path === "/tasks") return "tasks";
+  if (path === "/partners") return "partners";
   if (path === "/forms") return "forms";
+  if (path === "/inspirations") return "inspirations";
   if (path === "/files") return "files";
   if (path === "/meetings") return "meetings";
   if (path === "/notes") return "notes";
@@ -62,13 +78,15 @@ function getInitialTheme(): "light" | "dark" {
 }
 
 const ROUTE_TITLES: Record<RouteKey, { title: string; subtitle: string }> = {
-  schedule: { title: "每週倒數時程總表", subtitle: "對齊 Google 試算表結構 · 避開撞期大活動" },
+  schedule: { title: "每週倒數時程總表", subtitle: "對齊 Google 試算表結構 · 連續階段橫條與撞期避開" },
   tasks: { title: "待辦事項與各組進度", subtitle: "追蹤各大組別專案進度與待辦完成率" },
-  forms: { title: "招工表單與人力雷達", subtitle: "視覺化審核志工回覆、專長與各組缺口" },
+  partners: { title: "合作名單與臨時工編制", subtitle: "分類管理特邀講者、合作廠商接洽與臨時工任務完成狀況" },
+  forms: { title: "招工表單與人力雷達", subtitle: "視覺化審核志工回覆、試算表同步與各組缺口" },
+  inspirations: { title: "靈感借鏡", subtitle: "從國內外相似活動剖析專案相似處、時程巧思與前人避坑指南" },
   files: { title: "文件歸檔與行前手冊生成", subtitle: "儲存社群圖片、廠商檔案並自動生成講者／籌備手冊" },
-  meetings: { title: "會議記錄與會前大綱", subtitle: "管理會前大綱、議程安排、注意事項與決議轉待辦" },
+  meetings: { title: "會議記錄與雲端雙向共筆", subtitle: "支援 Google 文件與 HackMD 雙向匯入匯出、大綱與決議管理" },
   notes: { title: "個人筆記", subtitle: "記錄總召與個人的靈感、決策脈絡與備忘" },
-  bot: { title: "Campaign Bot", subtitle: "對話式操作時程、待辦、手冊生成與招工審核" },
+  bot: { title: "Campaign Bot", subtitle: "開案專案定位對焦、對話式操作時程、手冊與名單" },
   handoff: { title: "跨工具草稿接收", subtitle: "確認後才會寫入 BELL Campaign 專案資料庫" },
 };
 
@@ -110,6 +128,7 @@ export default function App() {
   const [newCampOpen, setNewCampOpen] = useState(false);
   const [newCampName, setNewCampName] = useState("");
   const [newCampSub, setNewCampSub] = useState("");
+  const [newCampBrief, setNewCampBrief] = useState("");
   const [newCampDate, setNewCampDate] = useState("2026-09-19");
   const [newCampPostWeeks, setNewCampPostWeeks] = useState(2);
 
@@ -271,13 +290,13 @@ export default function App() {
     }
   }
 
-  async function handleCreateCampaign(e: React.FormEvent) {
-    e.preventDefault();
+  async function createCampaignFlow(targetRoute: RouteKey) {
     if (!newCampName.trim()) return;
     try {
       const next = await apiWrite<CampaignSnapshot>("/api/campaigns", "POST", {
         name: newCampName.trim(),
         subtitle: newCampSub.trim() || undefined,
+        brief: newCampBrief.trim() || undefined,
         eventDate: newCampDate,
         postWeeks: newCampPostWeeks,
       });
@@ -285,18 +304,29 @@ export default function App() {
       setNewCampOpen(false);
       setNewCampName("");
       setNewCampSub("");
-      navigate("schedule");
-      notify(`已建立新活動專案「${next.campaign.name}」`);
+      setNewCampBrief("");
+      navigate(targetRoute);
+      notify(
+        targetRoute === "bot"
+          ? `已建立「${next.campaign.name}」，先跟 Campaign Bot 聊聊活動性質與靈感規劃吧！`
+          : `已建立新活動專案「${next.campaign.name}」`,
+      );
     } catch (err) {
       notify(err instanceof Error ? err.message : "建立專案失敗");
     }
   }
 
+  async function handleCreateCampaign(e: React.FormEvent) {
+    e.preventDefault();
+    await createCampaignFlow("bot");
+  }
+
   const counts = useMemo(() => {
-    if (!snapshot) return { openTodos: 0, pendingForms: 0, files: 0, overallPercent: 0 };
+    if (!snapshot) return { openTodos: 0, partners: 0, pendingForms: 0, files: 0, overallPercent: 0 };
     const metrics = computeCampaignMetrics(snapshot);
     return {
       openTodos: snapshot.todos.filter((t) => !t.done).length,
+      partners: snapshot.partners.length,
       pendingForms: snapshot.formResponses.filter((r) => r.status === "pending" || r.status === "interview").length,
       files: snapshot.files.length,
       overallPercent: metrics.overallPercent,
@@ -312,7 +342,9 @@ export default function App() {
   }> = [
     { key: "schedule", label: "時程總表", icon: CalendarRange },
     { key: "tasks", label: "待辦與進度", icon: CheckSquare, badge: counts.openTodos },
+    { key: "partners", label: "合作名單", icon: Briefcase, badge: counts.partners },
     { key: "forms", label: "招工表單", icon: ClipboardList, badge: counts.pendingForms, alert: counts.pendingForms > 0 },
+    { key: "inspirations", label: "靈感借鏡", icon: Lightbulb },
     { key: "files", label: "文件與手冊", icon: FolderArchive, badge: counts.files },
     { key: "meetings", label: "會議記錄", icon: Users },
     { key: "notes", label: "個人筆記", icon: NotebookPen },
@@ -584,11 +616,25 @@ export default function App() {
               onSnapshot={setSnapshot}
               notify={notify}
             />
+          ) : route === "partners" ? (
+            <PartnersView
+              snapshot={snapshot}
+              onSnapshot={setSnapshot}
+              onNavigateFiles={() => navigate("files")}
+              notify={notify}
+            />
           ) : route === "forms" ? (
             <FormsView
               snapshot={snapshot}
               suiteLinks={suiteLinks}
               onSnapshot={setSnapshot}
+              notify={notify}
+            />
+          ) : route === "inspirations" ? (
+            <InspirationsView
+              snapshot={snapshot}
+              onSnapshot={setSnapshot}
+              onNavigateBot={() => navigate("bot")}
               notify={notify}
             />
           ) : route === "files" ? (
@@ -642,7 +688,7 @@ export default function App() {
                 </Dialog.Close>
               </div>
               <Dialog.Description style={{ margin: 0, fontSize: 13, color: "var(--text-3)" }}>
-                系統會自動從籌備起點切分每週時程，並包含活動當週與會後復盤週次。
+                開案後可先與 Campaign Bot 聊聊活動形式與規模，由它協助規劃專案性質、每週時程與國內外「靈感借鏡」案例。
               </Dialog.Description>
 
               <div>
@@ -663,6 +709,17 @@ export default function App() {
                   placeholder="例如：主題演講 · 實作體驗 · 招工協作"
                   value={newCampSub}
                   onChange={(e) => setNewCampSub(e.target.value)}
+                />
+              </div>
+
+              <div>
+                <label className="field-label">專案初步想做什麼（選填，建立後也可跟 Bot 聊）</label>
+                <textarea
+                  rows={2}
+                  className="textarea"
+                  placeholder="例如：預計 120 人參與的產品設計與前端交流活動，包含講者與談、攤位體驗與會後復盤…"
+                  value={newCampBrief}
+                  onChange={(e) => setNewCampBrief(e.target.value)}
                 />
               </div>
 
@@ -690,13 +747,24 @@ export default function App() {
                 </div>
               </div>
 
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
                 <button type="button" className="btn" onClick={() => setNewCampOpen(false)}>
                   取消
                 </button>
-                <button type="submit" className="btn btn-primary">
-                  建立活動專案
-                </button>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={!newCampName.trim()}
+                    onClick={() => void createCampaignFlow("schedule")}
+                  >
+                    直接進入時程表
+                  </button>
+                  <button type="submit" className="btn btn-primary">
+                    <Bot size={14} />
+                    <span>建立並與 Bot 聊聊規劃性質</span>
+                  </button>
+                </div>
               </div>
             </form>
           </Dialog.Content>

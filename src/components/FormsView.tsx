@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   ArrowUpRight,
@@ -7,6 +7,7 @@ import {
   ExternalLink,
   FileSpreadsheet,
   Plus,
+  RefreshCw,
   Search,
   Settings2,
   Sparkles,
@@ -77,12 +78,15 @@ export default function FormsView({
   const [revTeamId, setRevTeamId] = useState<string>("");
   const [revNote, setRevNote] = useState<string>("");
 
-  // Form settings modal
+  // Form settings & Google Sheet sync state
   const [formEditOpen, setFormEditOpen] = useState(false);
   const [formTitle, setFormTitle] = useState("");
   const [formUrl, setFormUrl] = useState("");
+  const [formSheetSyncUrl, setFormSheetSyncUrl] = useState("");
   const [formDesc, setFormDesc] = useState("");
   const [formStatus, setFormStatus] = useState<"open" | "closed">("open");
+  const [syncingSheet, setSyncingSheet] = useState(false);
+  const [autoRefreshSheet, setAutoRefreshSheet] = useState(false);
 
   // Manual add modal
   const [addOpen, setAddOpen] = useState(false);
@@ -196,6 +200,7 @@ export default function FormsView({
     if (!activeForm) return;
     setFormTitle(activeForm.title);
     setFormUrl(activeForm.sourceUrl);
+    setFormSheetSyncUrl(activeForm.sheetSyncUrl ?? "");
     setFormDesc(activeForm.description);
     setFormStatus(activeForm.status);
     setFormEditOpen(true);
@@ -211,17 +216,59 @@ export default function FormsView({
         {
           title: formTitle.trim(),
           sourceUrl: formUrl.trim(),
+          sheetSyncUrl: formSheetSyncUrl.trim(),
           description: formDesc.trim(),
           status: formStatus,
         },
       );
       onSnapshot(next);
       setFormEditOpen(false);
-      notify("已更新招工表單設定");
+      notify("已更新招工表單與同步設定");
     } catch (err) {
       notify(err instanceof Error ? err.message : "更新失敗");
     }
   }
+
+  const syncFromGoogleSheet = useCallback(
+    async (silent = false, overrideUrl?: string) => {
+      if (!activeForm) return;
+      const targetUrl = (overrideUrl ?? activeForm.sheetSyncUrl ?? "").trim();
+      if (!targetUrl) {
+        if (!silent) openFormSettings();
+        return;
+      }
+      setSyncingSheet(true);
+      try {
+        const res = await apiWrite<{ importedCount: number; snapshot: CampaignSnapshot }>(
+          `/api/campaigns/${snapshot.campaign.id}/forms/${activeForm.id}/sync-sheet`,
+          "POST",
+          { sheetSyncUrl: targetUrl },
+        );
+        onSnapshot(res.snapshot);
+        if (!silent || res.importedCount > 0) {
+          notify(
+            res.importedCount > 0
+              ? `已從連結試算表同步新增 ${res.importedCount} 筆新回覆（重複名單已自動略過）`
+              : "已檢查連結試算表，目前無新增報名回覆",
+          );
+        }
+      } catch (err) {
+        if (!silent) notify(err instanceof Error ? err.message : "同步試算表失敗");
+      } finally {
+        setSyncingSheet(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeForm, snapshot.campaign.id, onSnapshot, notify],
+  );
+
+  useEffect(() => {
+    if (!autoRefreshSheet || !activeForm?.sheetSyncUrl) return;
+    const timer = window.setInterval(() => {
+      void syncFromGoogleSheet(true);
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [autoRefreshSheet, activeForm?.sheetSyncUrl, syncFromGoogleSheet]);
 
   async function submitNewApplicant(e: React.FormEvent) {
     e.preventDefault();
@@ -284,7 +331,7 @@ export default function FormsView({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
       {/* ── Form Overview Banner ─────────────────────────────────────────── */}
-      <section className="card" style={{ padding: "16px 20px" }}>
+      <section className="card" style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: 12 }}>
         <div
           style={{
             display: "flex",
@@ -330,12 +377,12 @@ export default function FormsView({
             {activeForm && (
               <button type="button" className="btn" onClick={openFormSettings}>
                 <Settings2 size={14} />
-                <span>表單設定</span>
+                <span>表單與同步設定</span>
               </button>
             )}
             <button type="button" className="btn" onClick={() => setCsvOpen(true)}>
               <FileSpreadsheet size={14} />
-              <span>匯入表單 CSV</span>
+              <span>匯入 CSV</span>
             </button>
             <button type="button" className="btn btn-primary" onClick={() => setAddOpen(true)}>
               <Plus size={14} />
@@ -343,6 +390,68 @@ export default function FormsView({
             </button>
           </div>
         </div>
+
+        {/* Google Sheet Deduplicated Sync Strip */}
+        {activeForm && (
+          <div
+            style={{
+              padding: "9px 12px",
+              borderRadius: "var(--radius-sm)",
+              background: "var(--panel)",
+              border: "1px solid var(--line)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 10,
+              flexWrap: "wrap",
+              fontSize: 12.5,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", color: "var(--text-2)" }}>
+              <FileSpreadsheet size={14} style={{ color: "var(--campaign-text)", flexShrink: 0 }} />
+              {activeForm.sheetSyncUrl ? (
+                <>
+                  <span>
+                    已綁定招工回覆試算表（自動過濾重複報名）
+                    {activeForm.lastSyncedAt
+                      ? ` · 上次同步 ${new Date(activeForm.lastSyncedAt).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit" })}`
+                      : ""}
+                  </span>
+                  <label style={{ display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer", color: "var(--text-3)" }}>
+                    <input
+                      type="checkbox"
+                      checked={autoRefreshSheet}
+                      onChange={(e) => setAutoRefreshSheet(e.target.checked)}
+                    />
+                    <span>停留本頁時每 60 秒自動拉取</span>
+                  </label>
+                </>
+              ) : (
+                <span>
+                  CSV 為手動匯入；若綁定 Google 表單連結的回覆試算表，即可一鍵拉取最新報名並自動去重。
+                </span>
+              )}
+            </div>
+
+            <div style={{ display: "flex", gap: 6 }}>
+              {activeForm.sheetSyncUrl ? (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-primary"
+                  disabled={syncingSheet}
+                  onClick={() => void syncFromGoogleSheet(false)}
+                >
+                  <RefreshCw size={12} />
+                  <span>{syncingSheet ? "同步中…" : "立即同步最新回覆"}</span>
+                </button>
+              ) : (
+                <button type="button" className="btn btn-sm" onClick={openFormSettings}>
+                  <span>連結回覆試算表</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </section>
 
       {/* ── Per-Team Headcount Fulfillment & Gap Radar ───────────────────── */}
@@ -1080,6 +1189,18 @@ export default function FormsView({
                   placeholder="https://docs.google.com/forms/..."
                   value={formUrl}
                   onChange={(e) => setFormUrl(e.target.value)}
+                />
+              </div>
+
+              <div>
+                <label className="field-label">
+                  連結招工回覆 Google 試算表網址（選填，開啟「知道連結的任何人可檢視」即可一鍵同步新回覆並去重）
+                </label>
+                <input
+                  className="input"
+                  placeholder="https://docs.google.com/spreadsheets/d/..."
+                  value={formSheetSyncUrl}
+                  onChange={(e) => setFormSheetSyncUrl(e.target.value)}
                 />
               </div>
 

@@ -21,6 +21,12 @@ async function withServer(
       explain: "http://127.0.0.1:21101",
       reader: "http://127.0.0.1:21104",
     },
+    docFetcher: async (url) => ({
+      source: url.includes("hackmd.io") ? "hackmd" : "gdoc",
+      text: `# 雲端同步週會\n- 開會時間：2026-07-18 21:00\n- 與會人員：全體組長\n\n## 會前大綱\n確認講者動線與外燴時段\n\n## 會議決議與後續行動\n鎖定奇偶分流報到口`,
+    }),
+    sheetCsvFetcher: async () =>
+      `姓名,Email,第一志願,角色,專長,可配合時段\n沈柏翰,bohan@example.com,場務與志工組,當日志工,"音控支援","8/05 全日"\n許庭甄,ting@example.com,行銷與設計組,組員,"社群文案","會前每週籌備, 8/05 全日"`,
   });
   const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
     const s = app.listen(0, "127.0.0.1", () => resolve(s));
@@ -198,5 +204,109 @@ test("End-to-end campaign workflows: todos, handbook generation, file upload, fo
     snap = (await applyRes.json()) as CampaignSnapshot;
     assert.equal(snap.campaign.pacing, "steady");
     assert.equal(snap.botMessages.at(-1)?.proposals[0]?.applied, true);
+  });
+});
+
+test("Meetings cloud doc import/export, Partners & Temp Staff tasks, Inspirations, and Form Sheet dedup sync", async () => {
+  await withServer(async (baseUrl) => {
+    // 1. Create a new campaign -> initializes Bot onboarding & comparable event inspirations
+    const createRes = await fetch(`${baseUrl}/api/campaigns`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "2026 產品設計與開發交流節",
+        subtitle: "主題與談 · 圓桌工作坊",
+        brief: "預計 140 人參與的設計與前端跨界單日活動",
+        eventDate: "2026-10-18",
+        postWeeks: 2,
+      }),
+    });
+    assert.equal(createRes.status, 201);
+    let snap = (await createRes.json()) as CampaignSnapshot;
+    const cid = snap.campaign.id;
+    assert.equal(snap.campaign.brief, "預計 140 人參與的設計與前端跨界單日活動");
+    assert.ok(snap.inspirations.length >= 3);
+    assert.ok(snap.botMessages[0]?.content.includes("跟我聊聊"));
+    assert.ok(snap.botMessages[0]?.content.includes("靈感借鏡"));
+
+    // 2. Import meeting from HackMD URL & export as .md and .doc
+    const impRes = await fetch(`${baseUrl}/api/campaigns/${cid}/meetings/import-doc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ docUrl: "https://hackmd.io/@bell/weekly-sync" }),
+    });
+    assert.equal(impRes.status, 201);
+    const impBody = (await impRes.json()) as { meeting: { id: string; title: string; docSource: string }; snapshot: CampaignSnapshot };
+    assert.equal(impBody.meeting.title, "雲端同步週會");
+    assert.equal(impBody.meeting.docSource, "hackmd");
+
+    const expMd = await fetch(`${baseUrl}/api/meetings/${impBody.meeting.id}/export?format=md`);
+    assert.equal(expMd.status, 200);
+    assert.match(await expMd.text(), /鎖定奇偶分流報到口/);
+
+    const expDoc = await fetch(`${baseUrl}/api/meetings/${impBody.meeting.id}/export?format=doc`);
+    assert.equal(expDoc.status, 200);
+    assert.match(await expDoc.text(), /<h1/i);
+
+    // 3. Add a Temp Staff partner with assigned tasks & toggle completion
+    const teamId = impBody.snapshot.teams[0].id;
+    const pRes = await fetch(`${baseUrl}/api/campaigns/${cid}/partners`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "temp_staff",
+        name: "郭庭瑋",
+        roleOrTopic: "報到台與動線引導",
+        teamId,
+        status: "confirmed",
+        shiftOrFee: "10/18 08:30–17:30 · NT$2,000",
+        tasks: [
+          { id: "t1", title: "佈置報到雙通道立牌", done: false },
+          { id: "t2", title: "中場茶點補水巡檢", done: false },
+        ],
+      }),
+    });
+    assert.equal(pRes.status, 201);
+    snap = (await pRes.json()) as CampaignSnapshot;
+    const staff = snap.partners.find((p) => p.name === "郭庭瑋");
+    assert.ok(staff);
+    assert.equal(staff.tasks.length, 2);
+
+    const patchStaff = await fetch(`${baseUrl}/api/partners/${staff.id}?campaignId=${cid}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        tasks: [
+          { id: "t1", title: "佈置報到雙通道立牌", done: true },
+          { id: "t2", title: "中場茶點補水巡檢", done: false },
+        ],
+      }),
+    });
+    assert.equal(patchStaff.status, 200);
+    snap = (await patchStaff.json()) as CampaignSnapshot;
+    assert.equal(snap.partners.find((p) => p.id === staff.id)?.tasks[0]?.done, true);
+
+    // 4. Recruitment Form Google Sheet sync deduplicates repeated syncs
+    const formId = snap.forms[0].id;
+    const sync1 = await fetch(`${baseUrl}/api/campaigns/${cid}/forms/${formId}/sync-sheet`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sheetSyncUrl: "https://docs.google.com/spreadsheets/d/1dvyOuE0JzIRaylJAFH_9GMulxKG6rOSUNrIZt92hxO8/edit#gid=0",
+      }),
+    });
+    assert.equal(sync1.status, 200);
+    const syncBody1 = (await sync1.json()) as { importedCount: number; snapshot: CampaignSnapshot };
+    assert.equal(syncBody1.importedCount, 2);
+
+    const sync2 = await fetch(`${baseUrl}/api/campaigns/${cid}/forms/${formId}/sync-sheet`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(sync2.status, 200);
+    const syncBody2 = (await sync2.json()) as { importedCount: number; snapshot: CampaignSnapshot };
+    assert.equal(syncBody2.importedCount, 0);
+    assert.equal(syncBody2.snapshot.formResponses.length, syncBody1.snapshot.formResponses.length);
   });
 });

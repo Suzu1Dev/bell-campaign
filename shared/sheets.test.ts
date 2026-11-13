@@ -8,8 +8,15 @@ import {
   buildPacingSchedulePreview,
   matrixToCsvBom,
   matrixToTsv,
+  normalizeStage,
   parseGoogleSheetCsv,
 } from "./sheets.js";
+import {
+  curateComparableEvents,
+  meetingToGoogleDocHtml,
+  meetingToHackMd,
+  parseMeetingDoc,
+} from "./docs.js";
 import {
   explainDraftHref,
   parseCampaignHandoff,
@@ -150,4 +157,48 @@ test("Suite handoff parser enforces allowlisted origins, single params, and clea
     "127.0.0.1",
   );
   assert.ok(eHref?.startsWith("http://127.0.0.1:21101/#/explain?"));
+});
+
+test("Bidirectional Google Docs & HackMD meeting parser round-trips cleanly and curates benchmarks", () => {
+  assert.equal(normalizeStage("20%"), "進度20%");
+  assert.equal(normalizeStage("進度60%"), "進度60%");
+
+  const draft = {
+    title: "倒數 3 週 · 講者接待與音控對齊會",
+    meetingDate: "2026-07-15 20:30",
+    attendees: "Panel 組、場務組、音控廠商",
+    agenda: "1. 確認講者簡報比例\n2. 雙軌報到分流測試",
+    arrangements: "- 20:30 各組快報\n- 20:50 動線核對",
+    precautions: "會前先上傳場地平面圖",
+    decisions: "7/20 前收齊所有講者 PDF 備份",
+    docUrl: "https://hackmd.io/@bell/summit-sync",
+    docSource: "hackmd" as const,
+  };
+
+  const hackmd = meetingToHackMd(draft, "2026 跨域盛會");
+  assert.match(hackmd, /^---\ntitle:/);
+  const parsedFromMd = parseMeetingDoc(hackmd);
+  assert.equal(parsedFromMd.title, draft.title);
+  assert.equal(parsedFromMd.meetingDate, draft.meetingDate);
+  assert.equal(parsedFromMd.attendees, draft.attendees);
+  assert.match(parsedFromMd.agenda, /雙軌報到分流測試/);
+  assert.match(parsedFromMd.decisions, /收齊所有講者 PDF/);
+
+  const gdocHtml = meetingToGoogleDocHtml(draft, "2026 跨域盛會");
+  const parsedFromHtml = parseMeetingDoc(gdocHtml);
+  assert.equal(parsedFromHtml.title, draft.title);
+  assert.match(parsedFromHtml.precautions, /場地平面圖/);
+
+  const curated = curateComparableEvents({
+    campaignId: "camp-test",
+    name: "校園開源設計工作坊",
+    subtitle: "主題與談 · 世界咖啡館",
+    brief: "由學生志工籌備的 150 人跨領域開源與設計交流活動",
+    mainGoal: "凝聚學生開發者與設計師",
+    teamNames: ["世界咖啡館", "場務與志工組"],
+  });
+  assert.equal(curated.length, 4);
+  assert.ok(curated.some((c) => c.region === "國內"));
+  assert.ok(curated.some((c) => c.region === "國際"));
+  assert.ok(curated.every((c) => c.pitfalls.length >= 2 && c.specialIdeas.length >= 2));
 });

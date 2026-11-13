@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   AlertTriangle,
@@ -46,11 +46,12 @@ import {
 } from "../../shared/sheets";
 import { apiWrite } from "../lib/api";
 
-function stageBadgeClass(stage: CellStage): string {
-  if (stage === "進度100%" || stage === "復盤") return "stage-badge is-done";
-  if (stage === "Debug" || stage === "RC") return "stage-badge is-verify";
-  if (stage === "活動") return "stage-badge is-live";
-  return "stage-badge";
+function stageSpanClass(stage: CellStage): string {
+  if (stage === "待排") return "stage-span-bar is-idle";
+  if (stage === "進度100%" || stage === "復盤") return "stage-span-bar is-done";
+  if (stage === "Debug" || stage === "RC") return "stage-span-bar is-verify";
+  if (stage === "活動") return "stage-span-bar is-live";
+  return "stage-span-bar is-progress";
 }
 
 export default function ScheduleView({
@@ -105,6 +106,7 @@ export default function ScheduleView({
     weeklyFocus: string;
     crossTeam: string;
     newTodo: string;
+    spanCount: number;
   } | null>(null);
 
   // Week editor state (dates, memo, milestones & clashing events)
@@ -196,17 +198,28 @@ export default function ScheduleView({
   async function saveCellEdit() {
     if (!editingCell) return;
     try {
-      let next = await apiWrite<CampaignSnapshot>(
-        `/api/cells?campaignId=${encodeURIComponent(snapshot.campaign.id)}`,
-        "PUT",
-        {
-          weekId: editingCell.week.id,
-          teamId: editingCell.team.id,
-          stage: editingCell.stage,
-          weeklyFocus: editingCell.weeklyFocus,
-          crossTeam: editingCell.crossTeam,
-        },
-      );
+      const startIdx = orderedWeeks.findIndex((w) => w.id === editingCell.week.id);
+      const targetWeeks =
+        startIdx >= 0 && editingCell.spanCount > 1
+          ? orderedWeeks.slice(startIdx, startIdx + editingCell.spanCount)
+          : [editingCell.week];
+
+      let next = snapshot;
+      for (let i = 0; i < targetWeeks.length; i += 1) {
+        const w = targetWeeks[i];
+        const existing = cellMap.get(`${w.id}:${editingCell.team.id}`);
+        next = await apiWrite<CampaignSnapshot>(
+          `/api/cells?campaignId=${encodeURIComponent(snapshot.campaign.id)}`,
+          "PUT",
+          {
+            weekId: w.id,
+            teamId: editingCell.team.id,
+            stage: editingCell.stage,
+            weeklyFocus: i === 0 ? editingCell.weeklyFocus : existing?.weeklyFocus ?? "",
+            crossTeam: i === 0 ? editingCell.crossTeam : existing?.crossTeam ?? "",
+          },
+        );
+      }
       if (editingCell.newTodo.trim()) {
         next = await apiWrite<CampaignSnapshot>(`/api/campaigns/${snapshot.campaign.id}/todos`, "POST", {
           teamId: editingCell.team.id,
@@ -216,7 +229,7 @@ export default function ScheduleView({
       }
       onSnapshot(next);
       setEditingCell(null);
-      notify("已更新週次進度");
+      notify(targetWeeks.length > 1 ? `已同步套用階段橫條至連續 ${targetWeeks.length} 週` : "已更新週次進度");
     } catch (err) {
       notify(err instanceof Error ? err.message : "儲存失敗");
     }
@@ -537,90 +550,185 @@ export default function ScheduleView({
             <tbody>
               {orderedTeams.map((team) => {
                 const tp = metrics.teamProgress[team.id] ?? { percent: 0, done: 0, total: 0, latestStage: "待排" };
+                const stageRuns: Array<{ stage: CellStage; weeks: CampaignWeek[] }> = [];
+                for (const w of orderedWeeks) {
+                  const st = cellMap.get(`${w.id}:${team.id}`)?.stage ?? "待排";
+                  const prev = stageRuns[stageRuns.length - 1];
+                  if (prev && prev.stage === st) {
+                    prev.weeks.push(w);
+                  } else {
+                    stageRuns.push({ stage: st, weeks: [w] });
+                  }
+                }
+
                 return (
-                  <tr key={team.id}>
-                    <td className="sticky-col team-row-header">
-                      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                        <span className={`team-dot team-dot-${team.color}`} />
-                        <strong style={{ fontSize: 13.5 }}>{team.name}</strong>
-                      </div>
-                      <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 4 }}>
-                        {team.lead ? `負責：${team.lead}` : "尚未指派組長"}
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
-                        <div className="progress-track" style={{ height: 5, flex: 1 }}>
-                          <div className="progress-fill" style={{ width: `${tp.percent}%` }} />
+                  <Fragment key={team.id}>
+                    {/* Row A: Merged Continuous Horizontal Stage Ribbon (`colSpan`) */}
+                    <tr className="stage-ribbon-row">
+                      <td className="sticky-col team-row-header" rowSpan={2}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                          <span className={`team-dot team-dot-${team.color}`} />
+                          <strong style={{ fontSize: 13.5 }}>{team.name}</strong>
                         </div>
-                        <span className="tabular" style={{ fontSize: 11.5, fontFamily: "var(--font-mono)", color: "var(--text-2)" }}>
-                          {tp.percent}%
-                        </span>
-                      </div>
-                      <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 3 }}>
-                        待辦 {tp.done}/{tp.total} 完成
-                      </div>
-                    </td>
-
-                    {orderedWeeks.map((week) => {
-                      const cell = cellMap.get(`${week.id}:${team.id}`);
-                      const stage = cell?.stage ?? "待排";
-                      const cellTodos = snapshot.todos.filter((td) => td.teamId === team.id && td.weekId === week.id);
-                      return (
-                        <td
-                          key={`${week.id}:${team.id}`}
-                          className={`matrix-cell ${week.phase === "post" ? "is-post" : ""}`}
-                          onClick={() =>
-                            setEditingCell({
-                              week,
-                              team,
-                              stage,
-                              weeklyFocus: cell?.weeklyFocus ?? "",
-                              crossTeam: cell?.crossTeam ?? "",
-                              newTodo: "",
-                            })
-                          }
-                        >
-                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4 }}>
-                            <span className={stageBadgeClass(stage)}>{stage}</span>
-                            {cellTodos.length > 0 && (
-                              <span className="tabular" style={{ fontSize: 11, color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>
-                                {cellTodos.filter((t) => t.done).length}/{cellTodos.length}
-                              </span>
-                            )}
+                        <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 4 }}>
+                          {team.lead ? `負責：${team.lead}` : "尚未指派組長"}
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
+                          <div className="progress-track" style={{ height: 5, flex: 1 }}>
+                            <div className="progress-fill" style={{ width: `${tp.percent}%` }} />
                           </div>
+                          <span className="tabular" style={{ fontSize: 11.5, fontFamily: "var(--font-mono)", color: "var(--text-2)" }}>
+                            {tp.percent}%
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 3 }}>
+                          待辦 {tp.done}/{tp.total} 完成
+                        </div>
+                      </td>
 
-                          {cell?.weeklyFocus && <div className="cell-focus">{cell.weeklyFocus}</div>}
+                      {stageRuns.map((run) => {
+                        const firstWeek = run.weeks[0];
+                        const lastWeek = run.weeks[run.weeks.length - 1];
+                        const firstCell = cellMap.get(`${firstWeek.id}:${team.id}`);
+                        const isAllPost = run.weeks.every((w) => w.phase === "post");
+                        const startDay = firstWeek.dateRange.split(/[–~-]/)[0]?.trim() ?? firstWeek.dateRange;
+                        const endDay = lastWeek.dateRange.split(/[–~-]/).pop()?.trim() ?? lastWeek.dateRange;
+                        return (
+                          <td
+                            key={`ribbon-${team.id}-${firstWeek.id}`}
+                            colSpan={run.weeks.length}
+                            className={`stage-ribbon-cell ${isAllPost ? "is-post" : ""}`}
+                          >
+                            <div
+                              className={stageSpanClass(run.stage)}
+                              role="button"
+                              tabIndex={0}
+                              title="點擊調整此階段與連續週數"
+                              onClick={() =>
+                                setEditingCell({
+                                  week: firstWeek,
+                                  team,
+                                  stage: run.stage,
+                                  weeklyFocus: firstCell?.weeklyFocus ?? "",
+                                  crossTeam: firstCell?.crossTeam ?? "",
+                                  newTodo: "",
+                                  spanCount: run.weeks.length,
+                                })
+                              }
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  setEditingCell({
+                                    week: firstWeek,
+                                    team,
+                                    stage: run.stage,
+                                    weeklyFocus: firstCell?.weeklyFocus ?? "",
+                                    crossTeam: firstCell?.crossTeam ?? "",
+                                    newTodo: "",
+                                    spanCount: run.weeks.length,
+                                  });
+                                }
+                              }}
+                            >
+                              <span>{run.stage}</span>
+                              {run.weeks.length > 1 && (
+                                <span className="stage-span-meta">
+                                  連續 {run.weeks.length} 週 · {startDay}–{endDay}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                        );
+                      })}
+                    </tr>
 
-                          {cellTodos.length > 0 && (
-                            <ul className="cell-todo-list">
-                              {cellTodos.map((td) => (
-                                <li key={td.id} className={`cell-todo-item ${td.done ? "is-done" : ""}`}>
-                                  <button
-                                    type="button"
-                                    aria-label={`切換完成：${td.title}`}
-                                    onClick={(e) => toggleTodoInline(td.id, !td.done, e)}
-                                    style={{
-                                      border: "none",
-                                      background: "transparent",
-                                      padding: 0,
-                                      marginTop: 1,
-                                      cursor: "pointer",
-                                      color: td.done ? "var(--ok)" : "var(--text-3)",
-                                      flexShrink: 0,
-                                    }}
-                                  >
-                                    {td.done ? <CheckCircle2 size={13} /> : <Circle size={13} />}
-                                  </button>
-                                  <span>{td.title}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          )}
+                    {/* Row B: Per-Week Focus & Todos (Deduplicating Repeated Focus/CrossTeam) */}
+                    <tr>
+                      {orderedWeeks.map((week, wIdx) => {
+                        const cell = cellMap.get(`${week.id}:${team.id}`);
+                        const stage = cell?.stage ?? "待排";
+                        const prevWeek = wIdx > 0 ? orderedWeeks[wIdx - 1] : null;
+                        const prevCell = prevWeek ? cellMap.get(`${prevWeek.id}:${team.id}`) : undefined;
 
-                          {cell?.crossTeam && <div className="cell-cross">跨部：{cell.crossTeam}</div>}
-                        </td>
-                      );
-                    })}
-                  </tr>
+                        const curFocus = (cell?.weeklyFocus ?? "").trim();
+                        const prevFocus = (prevCell?.weeklyFocus ?? "").trim();
+                        const showFocus = Boolean(curFocus) && curFocus !== prevFocus;
+
+                        const curCross = (cell?.crossTeam ?? "").trim();
+                        const prevCross = (prevCell?.crossTeam ?? "").trim();
+                        const showCross = Boolean(curCross) && curCross !== prevCross;
+
+                        const cellTodos = snapshot.todos.filter((td) => td.teamId === team.id && td.weekId === week.id);
+                        const isEmptyBody = !showFocus && !showCross && cellTodos.length === 0;
+
+                        return (
+                          <td
+                            key={`${week.id}:${team.id}`}
+                            className={`matrix-cell ${week.phase === "post" ? "is-post" : ""}`}
+                            onClick={() =>
+                              setEditingCell({
+                                week,
+                                team,
+                                stage,
+                                weeklyFocus: cell?.weeklyFocus ?? "",
+                                crossTeam: cell?.crossTeam ?? "",
+                                newTodo: "",
+                                spanCount: 1,
+                              })
+                            }
+                          >
+                            {cellTodos.length > 0 && (
+                              <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 2 }}>
+                                <span className="tabular" style={{ fontSize: 11, color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>
+                                  待辦 {cellTodos.filter((t) => t.done).length}/{cellTodos.length}
+                                </span>
+                              </div>
+                            )}
+
+                            {showFocus && (
+                              <div className="cell-focus" style={{ marginTop: 2 }}>
+                                {curFocus}
+                              </div>
+                            )}
+
+                            {cellTodos.length > 0 && (
+                              <ul className="cell-todo-list">
+                                {cellTodos.map((td) => (
+                                  <li key={td.id} className={`cell-todo-item ${td.done ? "is-done" : ""}`}>
+                                    <button
+                                      type="button"
+                                      aria-label={`切換完成：${td.title}`}
+                                      onClick={(e) => toggleTodoInline(td.id, !td.done, e)}
+                                      style={{
+                                        border: "none",
+                                        background: "transparent",
+                                        padding: 0,
+                                        marginTop: 1,
+                                        cursor: "pointer",
+                                        color: td.done ? "var(--ok)" : "var(--text-3)",
+                                        flexShrink: 0,
+                                      }}
+                                    >
+                                      {td.done ? <CheckCircle2 size={13} /> : <Circle size={13} />}
+                                    </button>
+                                    <span>{td.title}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+
+                            {showCross && <div className="cell-cross">跨部：{curCross}</div>}
+
+                            {isEmptyBody && (
+                              <div style={{ fontSize: 12, color: "var(--text-4)", paddingTop: 2 }}>
+                                {curFocus ? "↳ 延續上週重點" : "＋ 點擊補充重點或待辦"}
+                              </div>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -628,7 +736,7 @@ export default function ScheduleView({
         </div>
       </section>
 
-      {/* ── Dialog 1: Edit Cell (Stage, Weekly Focus, Cross-Team, Quick Todo) ── */}
+      {/* ── Dialog 1: Edit Cell (Stage, Multi-Week Span, Weekly Focus, Cross-Team, Quick Todo) ── */}
       <Dialog.Root open={Boolean(editingCell)} onOpenChange={(o) => !o && setEditingCell(null)}>
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
@@ -647,7 +755,7 @@ export default function ScheduleView({
                 </div>
 
                 <div>
-                  <label className="field-label">當週階段與完成度</label>
+                  <label className="field-label">當週階段與完成度（連續相同階段會自動合併為一條橫幅）</label>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                     {CELL_STAGES.map((st) => (
                       <button
@@ -657,6 +765,22 @@ export default function ScheduleView({
                         onClick={() => setEditingCell({ ...editingCell, stage: st })}
                       >
                         {st}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="field-label">階段橫跨週數（從本週起算）</label>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {[1, 2, 3, 4].map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        className={`btn btn-sm ${editingCell.spanCount === n ? "btn-primary" : ""}`}
+                        onClick={() => setEditingCell({ ...editingCell, spanCount: n })}
+                      >
+                        {n === 1 ? "僅本週" : `連續 ${n} 週`}
                       </button>
                     ))}
                   </div>

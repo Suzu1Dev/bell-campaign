@@ -14,9 +14,13 @@ import {
 
 const STAGE_PROGRESS_MAP: Record<CellStage, number> = {
   待排: 0,
+  "進度20%": 20,
   "進度25%": 25,
+  "進度40%": 40,
   "進度50%": 50,
+  "進度60%": 60,
   "進度75%": 75,
+  "進度80%": 80,
   "進度100%": 100,
   Debug: 92,
   RC: 96,
@@ -156,13 +160,17 @@ export function parseCsvGrid(raw: string): string[][] {
   return rows.filter((r) => r.some((c) => c.length > 0));
 }
 
-function normalizeStage(raw: string): CellStage {
+export function normalizeStage(raw: string): CellStage {
   const clean = raw.replace(/\s+/g, "");
   if ((CELL_STAGES as readonly string[]).includes(clean)) return clean as CellStage;
   if (/100%/.test(clean)) return "進度100%";
+  if (/80%/.test(clean)) return "進度80%";
   if (/75%/.test(clean)) return "進度75%";
+  if (/60%/.test(clean)) return "進度60%";
   if (/50%/.test(clean)) return "進度50%";
+  if (/40%/.test(clean)) return "進度40%";
   if (/25%/.test(clean)) return "進度25%";
+  if (/20%|15%|10%/.test(clean)) return "進度20%";
   if (/debug/i.test(clean)) return "Debug";
   if (/^rc$/i.test(clean)) return "RC";
   if (/活動/.test(clean)) return "活動";

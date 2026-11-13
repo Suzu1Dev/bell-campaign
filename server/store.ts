@@ -9,6 +9,8 @@ import {
   CELL_STAGES,
   FILE_CATEGORIES,
   PACING_LEVELS,
+  PARTNER_KINDS,
+  PARTNER_STATUSES,
   TEAM_COLORS,
   type AiProvider,
   type ApplicantRole,
@@ -17,9 +19,11 @@ import {
   type BotActionProposal,
   type BotMessage,
   type CampaignFile,
+  type CampaignInspiration,
   type CampaignMeeting,
   type CampaignMeta,
   type CampaignNote,
+  type CampaignPartner,
   type CampaignSnapshot,
   type CampaignSummary,
   type CampaignTeam,
@@ -29,13 +33,18 @@ import {
   type FileCategory,
   type FormResponseItem,
   type HandbookTemplate,
+  type MeetingDocSource,
   type MonthlyGoal,
   type PacingLevel,
+  type PartnerKind,
+  type PartnerStatus,
   type ProviderSettings,
   type ScheduleCell,
   type TeamColor,
+  type TempStaffTask,
   type WeekEventItem,
 } from "../shared/types.js";
+import { curateComparableEvents } from "../shared/docs.js";
 import { parseCsvGrid, parseGoogleSheetCsv } from "../shared/sheets.js";
 import { AppError } from "./errors.js";
 
@@ -225,6 +234,36 @@ export class CampaignStore {
         submitted_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS partners (
+        id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL DEFAULT 'speaker',
+        name TEXT NOT NULL,
+        organization TEXT NOT NULL DEFAULT '',
+        role_or_topic TEXT NOT NULL DEFAULT '',
+        contact TEXT NOT NULL DEFAULT '',
+        team_id TEXT REFERENCES teams(id) ON DELETE SET NULL,
+        status TEXT NOT NULL DEFAULT 'prospect',
+        shift_or_fee TEXT NOT NULL DEFAULT '',
+        notes TEXT NOT NULL DEFAULT '',
+        tasks_json TEXT NOT NULL DEFAULT '[]',
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS inspirations (
+        id TEXT PRIMARY KEY,
+        campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        region TEXT NOT NULL DEFAULT '國內',
+        category TEXT NOT NULL DEFAULT '',
+        similarity_score INTEGER NOT NULL DEFAULT 80,
+        why_similar TEXT NOT NULL DEFAULT '',
+        timeline_pattern TEXT NOT NULL DEFAULT '',
+        special_ideas_json TEXT NOT NULL DEFAULT '[]',
+        pitfalls_json TEXT NOT NULL DEFAULT '[]',
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS bot_messages (
         id TEXT PRIMARY KEY,
         campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -235,9 +274,60 @@ export class CampaignStore {
       );
     `);
 
+    this.ensureColumn("campaigns", "brief", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("meetings", "doc_url", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("meetings", "doc_source", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("forms", "sheet_sync_url", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("forms", "last_synced_at", "TEXT NOT NULL DEFAULT ''");
+
     const countRow = this.db.prepare("SELECT COUNT(*) AS cnt FROM campaigns").get() as { cnt: number };
     if (countRow.cnt === 0) {
       this.seedInitialCampaign();
+    } else {
+      this.backfillNewModulesIfEmpty();
+    }
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
+  }
+
+  private backfillNewModulesIfEmpty(): void {
+    const summit = this.db
+      .prepare("SELECT id, name, subtitle, brief, main_goal FROM campaigns WHERE id = 'camp-2026-summit'")
+      .get() as { id: string; name: string; subtitle: string; brief: string; main_goal: string } | undefined;
+    if (!summit) return;
+
+    const pCnt = (
+      this.db.prepare("SELECT COUNT(*) AS cnt FROM partners WHERE campaign_id = ?").get(summit.id) as { cnt: number }
+    ).cnt;
+    if (pCnt === 0) {
+      this.seedPartnersForSummit(summit.id, new Date().toISOString());
+    }
+
+    const iCnt = (
+      this.db.prepare("SELECT COUNT(*) AS cnt FROM inspirations WHERE campaign_id = ?").get(summit.id) as { cnt: number }
+    ).cnt;
+    if (iCnt === 0) {
+      if (!summit.brief) {
+        this.db
+          .prepare("UPDATE campaigns SET brief = ? WHERE id = ?")
+          .run("結合世界咖啡館圓桌對話與 Panel 跨界與談的 180 人單日技術設計社群年會。", summit.id);
+      }
+      this.seedInspirationsForCampaign(summit.id, {
+        name: summit.name,
+        subtitle: summit.subtitle,
+        brief: summit.brief || "結合世界咖啡館圓桌對話與 Panel 跨界與談的 180 人單日技術設計社群年會。",
+        mainGoal: summit.main_goal,
+        teamNames: ["世界咖啡館", "Panel 與談", "行銷與設計組", "場務與志工組"],
+      });
+      // Showcase multi-week continuous stage spans on initial visible columns
+      this.db.prepare("UPDATE cells SET stage = '進度50%' WHERE week_id IN ('wk-2', 'wk-3') AND team_id = 'tm-cafe'").run();
+      this.db.prepare("UPDATE cells SET stage = '進度20%' WHERE week_id IN ('wk-1', 'wk-2') AND team_id = 'tm-mkt'").run();
+      this.db.prepare("UPDATE cells SET stage = '進度50%' WHERE week_id IN ('wk-2', 'wk-3') AND team_id = 'tm-ops'").run();
     }
   }
 
@@ -252,13 +342,14 @@ export class CampaignStore {
 
     this.db
       .prepare(
-        `INSERT INTO campaigns (id, name, subtitle, event_date, start_date, post_weeks, pacing, main_goal, monthly_goals_json, sheet_url, slides_url, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO campaigns (id, name, subtitle, brief, event_date, start_date, post_weeks, pacing, main_goal, monthly_goals_json, sheet_url, slides_url, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         campaignId,
         "2026 夏季跨域社群年會",
         "世界咖啡館 × Panel 深度論壇籌備總表",
+        "結合世界咖啡館圓桌對話與 Panel 跨界與談的 180 人單日技術設計社群年會。",
         "2026-08-05",
         "2026-06-22",
         2,
@@ -421,10 +512,10 @@ export class CampaignStore {
     });
 
     const cellsSeed: Array<{ w: string; t: string; stage: CellStage; focus: string; cross?: string }> = [
-      // 世界咖啡館 (Directly aligned with reference Google Sheet)
+      // 世界咖啡館 (Directly aligned with reference Google Sheet + multi-week 50% invitation span)
       { w: "wk-1", t: "tm-cafe", stage: "進度25%", focus: "名單研究 & 確認" },
       { w: "wk-2", t: "tm-cafe", stage: "進度50%", focus: "第一波寄信邀約" },
-      { w: "wk-3", t: "tm-cafe", stage: "進度75%", focus: "第二波寄信與追蹤" },
+      { w: "wk-3", t: "tm-cafe", stage: "進度50%", focus: "第二波寄信與追蹤" },
       { w: "wk-4", t: "tm-cafe", stage: "進度100%", focus: "企劃定案 & 行前通知", cross: "圓桌題綱討論 · 主持人講稿準備" },
       { w: "wk-5", t: "tm-cafe", stage: "Debug", focus: "桌長簡報與換桌動線檢核" },
       { w: "wk-6", t: "tm-cafe", stage: "RC", focus: "主持彩排與計時牌確認" },
@@ -443,10 +534,10 @@ export class CampaignStore {
       { w: "wk-8", t: "tm-panel", stage: "復盤", focus: "寄送與談精華紀錄與感謝信" },
       { w: "wk-9", t: "tm-panel", stage: "復盤", focus: "議程滿意度檢討" },
 
-      // 行銷與設計組
-      { w: "wk-1", t: "tm-mkt", stage: "進度25%", focus: "主視覺色彩規範與社群版型" },
-      { w: "wk-2", t: "tm-mkt", stage: "進度50%", focus: "早鳥報名頁與首波預告圖卡" },
-      { w: "wk-3", t: "tm-mkt", stage: "進度75%", focus: "講者陣容介紹圖卡製作", cross: "向咖啡館／Panel 收齊講者頭像簡介" },
+      // 行銷與設計組 (20%-step continuous span example)
+      { w: "wk-1", t: "tm-mkt", stage: "進度20%", focus: "主視覺色彩規範與社群版型" },
+      { w: "wk-2", t: "tm-mkt", stage: "進度20%", focus: "早鳥報名頁與首波預告圖卡" },
+      { w: "wk-3", t: "tm-mkt", stage: "進度60%", focus: "講者陣容介紹圖卡製作", cross: "向咖啡館／Panel 收齊講者頭像簡介" },
       { w: "wk-4", t: "tm-mkt", stage: "進度100%", focus: "行前懶人包排版與場地指引圖", cross: "對齊場務組報到動線圖" },
       { w: "wk-5", t: "tm-mkt", stage: "Debug", focus: "名牌、手舉牌與背板送印校色" },
       { w: "wk-6", t: "tm-mkt", stage: "RC", focus: "倒數 7 天貼文排程（錯開撞期熱點）" },
@@ -457,7 +548,7 @@ export class CampaignStore {
       // 場務與志工組
       { w: "wk-1", t: "tm-ops", stage: "進度25%", focus: "展演廳場勘與外燴廠商詢價" },
       { w: "wk-2", t: "tm-ops", stage: "進度50%", focus: "釋出招工表單與器材清單盤點" },
-      { w: "wk-3", t: "tm-ops", stage: "進度75%", focus: "第一批志工審核與茶點下訂" },
+      { w: "wk-3", t: "tm-ops", stage: "進度50%", focus: "第一批志工審核與茶點下訂" },
       { w: "wk-4", t: "tm-ops", stage: "進度100%", focus: "發送志工行前通知與班表分發", cross: "確認世界咖啡館圓桌桌椅配置" },
       { w: "wk-5", t: "tm-ops", stage: "Debug", focus: "線上志工行前說明會與報到演練" },
       { w: "wk-6", t: "tm-ops", stage: "RC", focus: "Kazma 場控職務交接演練與物資裝箱" },
@@ -872,6 +963,15 @@ export class CampaignStore {
       );
     }
 
+    this.seedPartnersForSummit(campaignId, now);
+    this.seedInspirationsForCampaign(campaignId, {
+      name: "2026 夏季跨域社群年會",
+      subtitle: "世界咖啡館 × Panel 深度論壇籌備總表",
+      brief: "結合世界咖啡館圓桌對話與 Panel 跨界與談的 180 人單日技術設計社群年會。",
+      mainGoal: "凝聚 180 位開發者與設計師深度交流，在避開八月初大型撞期活動的前提下準時完成講者邀約、宣傳與志工培訓。",
+      teamNames: ["世界咖啡館", "Panel 與談", "行銷與設計組", "場務與志工組"],
+    });
+
     // Seed initial Campaign Bot message
     this.db
       .prepare(
@@ -881,9 +981,208 @@ export class CampaignStore {
       .run(
         "bot-welcome",
         campaignId,
-        "你好！我是 **Campaign Bot**。我可以協助你調整時程緊湊度、避開撞期排程、新增各組待辦、撰寫會議大綱、生成講者／籌備人員行前手冊，或盤點招工表單缺口。直接告訴我想處理哪一部分即可。",
+        "你好！我是 **Campaign Bot**。我可以協助你規劃新專案定位、調整時程緊湊度、管理講者／廠商／臨時工合作名單、雙向同步會議記錄、生成行前手冊，或盤點招工表單缺口。直接告訴我想處理哪一部分即可。",
         now,
       );
+  }
+
+  private seedPartnersForSummit(campaignId: string, now: string): void {
+    const insertPartner = this.db.prepare(
+      `INSERT INTO partners (id, campaign_id, kind, name, organization, role_or_topic, contact, team_id, status, shift_or_fee, notes, tasks_json, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+
+    const seedList: Array<{
+      id: string;
+      kind: PartnerKind;
+      name: string;
+      org: string;
+      topic: string;
+      contact: string;
+      teamId: string | null;
+      status: PartnerStatus;
+      shiftOrFee: string;
+      notes: string;
+      tasks?: TempStaffTask[];
+    }> = [
+      // Speakers
+      {
+        id: "pt-spk-1",
+        kind: "speaker",
+        name: "林致遠 博士",
+        org: "OpenUX 實驗室共同創辦人",
+        topic: "Panel 主題與談：AI 輔助產品設計與開源協作新常態",
+        contact: "cy.lin@openux.example",
+        teamId: "tm-panel",
+        status: "briefed",
+        shiftOrFee: "出席車馬費 NT$4,000 · 13:30 報到",
+        notes: "已確認不與 COSCUP 演講撞期，簡報 PDF 備份預計 7/24 收齊。",
+      },
+      {
+        id: "pt-spk-2",
+        kind: "speaker",
+        name: "許安榆",
+        org: "FlowCraft 資深設計系統架構師",
+        topic: "世界咖啡館第 1 桌主桌長：跨職能設計系統落地實務",
+        contact: "anyu.hsu@flowcraft.example",
+        teamId: "tm-cafe",
+        status: "confirmed",
+        shiftOrFee: "講師禮遇票 + 車馬費 NT$3,000",
+        notes: "希望能準備雙色便利貼與 A2 桌紙供與會者繪製元件樹。",
+      },
+      {
+        id: "pt-spk-3",
+        kind: "speaker",
+        name: "高翊群",
+        org: "獨立開發者／技術作家",
+        topic: "Panel 與談嘉賓：一人產品團隊的自動化工作流",
+        contact: "yichun.kao@indie.example",
+        teamId: "tm-panel",
+        status: "contacting",
+        shiftOrFee: "出席車馬費 NT$4,000 · 待覆彩排時段",
+        notes: "第二波邀約信已寄出，本週五追蹤線上對稿時間。",
+      },
+
+      // Vendors
+      {
+        id: "pt-vnd-1",
+        kind: "vendor",
+        name: "森日手作餐飲",
+        org: "外燴茶點與飲品協力",
+        topic: "180 人份午茶點心盒與莊園咖啡桶（含全素 25 份）",
+        contact: "窗口 林經理 · 02-2700-8812",
+        teamId: "tm-ops",
+        status: "confirmed",
+        shiftOrFee: "合約總額 NT$39,600（已付訂金 30%）",
+        notes: "8/05 13:15 由 B1 貨梯進場擺設，16:45 收拾保溫桶。",
+      },
+      {
+        id: "pt-vnd-2",
+        kind: "vendor",
+        name: "聲脈工程有限公司",
+        org: "舞台燈光音響與圓桌收音",
+        topic: "無線手麥 6 支、領夾麥 4 組、主舞台雙投影切換器與駐場音控",
+        contact: "窗口 趙工程師 · @soundpulse_tw",
+        teamId: "tm-ops",
+        status: "briefed",
+        shiftOrFee: "報價 NT$28,000（活動後月結開發票）",
+        notes: "已配對場務組劉冠廷共同對接，8/05 08:00 進場調音。",
+      },
+      {
+        id: "pt-vnd-3",
+        kind: "vendor",
+        name: "印格美學印刷",
+        org: "大圖背板與識別證印製",
+        topic: "主舞台橫幅、雙面議程識別證 220 份、世界咖啡館桌牌與 A2 桌紙",
+        contact: "service@inkgrid.example",
+        teamId: "tm-mkt",
+        status: "contacting",
+        shiftOrFee: "估價 NT$14,500 · 7/23 截稿送印",
+        notes: "等待行銷設計組確認最終贊助與合作夥伴 Logo 排列。",
+      },
+
+      // Temp Staff (臨時工，含組別、負責工作項目與完成狀況)
+      {
+        id: "pt-tmp-1",
+        kind: "temp_staff",
+        name: "陳品叡",
+        org: "場務機動臨時工",
+        topic: "重物搬運、圓桌桌椅復原與 B1 貨梯進撤場引導",
+        contact: "0912-345-678 · Line: @pinrui_c",
+        teamId: "tm-ops",
+        status: "confirmed",
+        shiftOrFee: "8/05 07:30–18:30（時薪 NT$220 · 含午餐便當）",
+        notes: "具備大型展場進撤場經驗，已填寫勞報單資料。",
+        tasks: [
+          { id: "tsk-1", title: "07:45 協助聲脈工程自 B1 貨梯搬運音箱入廳", done: true },
+          { id: "tsk-2", title: "08:30 排列世界咖啡館 8 組圓桌與 64 張座椅", done: true },
+          { id: "tsk-3", title: "17:30 活動結束後復原展演廳標準座位並清點垃圾袋", done: false },
+        ],
+      },
+      {
+        id: "pt-tmp-2",
+        kind: "temp_staff",
+        name: "方語晴",
+        org: "前台驗票與貴賓接待臨時工",
+        topic: "1F 報到處高速 QR 驗票、識別證發放與講者休息室茶水補給",
+        contact: "0928-661-204 · Line: @yuching_f",
+        teamId: "tm-panel",
+        status: "confirmed",
+        shiftOrFee: "8/05 08:30–14:30（半日班 NT$1,320）",
+        notes: "熟悉 Accupass / KKTIX 驗票 App，中英文應對流利。",
+        tasks: [
+          { id: "tsk-4", title: "08:40 完成報到平板登入與備用簽到名冊核對", done: true },
+          { id: "tsk-5", title: "09:00–10:15 執行奇數號入場通道驗票與發放名牌", done: false },
+          { id: "tsk-6", title: "13:15 引導下午場 Panel 與談嘉賓至講者休息室", done: false },
+        ],
+      },
+      {
+        id: "pt-tmp-3",
+        kind: "temp_staff",
+        name: "羅子軒",
+        org: "現場動態側拍與快剪臨時工",
+        topic: "世界咖啡館換桌花絮拍攝與中場 30 秒精華限動快剪",
+        contact: "0955-109-882 · IG: @zx_reel",
+        teamId: "tm-mkt",
+        status: "confirmed",
+        shiftOrFee: "8/05 09:30–17:30（專案日薪 NT$3,200）",
+        notes: "自備穩定器與筆電，需預留媒體席插座。",
+        tasks: [
+          { id: "tsk-7", title: "確認行銷設計組限動字卡套版與雲端上傳資料夾權限", done: true },
+          { id: "tsk-8", title: "12:30 前交付上午場 8 張精修橫幅照片供社群即時發文", done: false },
+          { id: "tsk-9", title: "18:00 前備份全天 RAW 檔與直式短影音素材至歸檔區", done: false },
+        ],
+      },
+    ];
+
+    for (const p of seedList) {
+      insertPartner.run(
+        p.id,
+        campaignId,
+        p.kind,
+        p.name,
+        p.org,
+        p.topic,
+        p.contact,
+        p.teamId,
+        p.status,
+        p.shiftOrFee,
+        p.notes,
+        JSON.stringify(p.tasks ?? []),
+        now,
+      );
+    }
+  }
+
+  seedInspirationsForCampaign(
+    campaignId: string,
+    input: { name: string; subtitle: string; brief: string; mainGoal: string; teamNames: string[]; focusHint?: string },
+  ): void {
+    const now = new Date().toISOString();
+    const curated = curateComparableEvents({
+      campaignId,
+      ...input,
+    });
+    this.db.prepare("DELETE FROM inspirations WHERE campaign_id = ?").run(campaignId);
+    const insertInsp = this.db.prepare(
+      `INSERT INTO inspirations (id, campaign_id, title, region, category, similarity_score, why_similar, timeline_pattern, special_ideas_json, pitfalls_json, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const item of curated) {
+      insertInsp.run(
+        `insp-${randomUUID().slice(0, 8)}`,
+        campaignId,
+        item.title,
+        item.region,
+        item.category,
+        item.similarityScore,
+        item.whySimilar,
+        item.timelinePattern,
+        JSON.stringify(item.specialIdeas),
+        JSON.stringify(item.pitfalls),
+        now,
+      );
+    }
   }
 
   // ── Settings ─────────────────────────────────────────────────────────────
@@ -953,6 +1252,7 @@ export class CampaignStore {
           id: string;
           name: string;
           subtitle: string;
+          brief?: string;
           event_date: string;
           start_date: string;
           post_weeks: number;
@@ -971,6 +1271,7 @@ export class CampaignStore {
       id: row.id,
       name: row.name,
       subtitle: row.subtitle,
+      brief: String(row.brief ?? ""),
       eventDate: row.event_date,
       startDate: row.start_date,
       postWeeks: row.post_weeks,
@@ -1098,7 +1399,47 @@ export class CampaignStore {
       arrangements: String(m.arrangements ?? ""),
       precautions: String(m.precautions ?? ""),
       decisions: String(m.decisions ?? ""),
+      docUrl: String(m.doc_url ?? ""),
+      docSource: (["gdoc", "hackmd", "markdown"].includes(String(m.doc_source)) ? m.doc_source : "") as MeetingDocSource,
       updatedAt: String(m.updated_at),
+    }));
+
+    const partners: CampaignPartner[] = (
+      this.db
+        .prepare("SELECT * FROM partners WHERE campaign_id = ? ORDER BY kind ASC, updated_at DESC")
+        .all(targetId) as Array<Record<string, unknown>>
+    ).map((p) => ({
+      id: String(p.id),
+      campaignId: String(p.campaign_id),
+      kind: ((PARTNER_KINDS as readonly string[]).includes(String(p.kind)) ? p.kind : "speaker") as PartnerKind,
+      name: String(p.name),
+      organization: String(p.organization ?? ""),
+      roleOrTopic: String(p.role_or_topic ?? ""),
+      contact: String(p.contact ?? ""),
+      teamId: p.team_id ? String(p.team_id) : null,
+      status: ((PARTNER_STATUSES as readonly string[]).includes(String(p.status)) ? p.status : "prospect") as PartnerStatus,
+      shiftOrFee: String(p.shift_or_fee ?? ""),
+      notes: String(p.notes ?? ""),
+      tasks: safeJsonParse<TempStaffTask[]>(String(p.tasks_json ?? "[]"), []),
+      updatedAt: String(p.updated_at),
+    }));
+
+    const inspirations: CampaignInspiration[] = (
+      this.db
+        .prepare("SELECT * FROM inspirations WHERE campaign_id = ? ORDER BY similarity_score DESC, updated_at DESC")
+        .all(targetId) as Array<Record<string, unknown>>
+    ).map((ins) => ({
+      id: String(ins.id),
+      campaignId: String(ins.campaign_id),
+      title: String(ins.title),
+      region: (ins.region === "國際" ? "國際" : "國內") as "國內" | "國際",
+      category: String(ins.category ?? ""),
+      similarityScore: Number(ins.similarity_score ?? 80),
+      whySimilar: String(ins.why_similar ?? ""),
+      timelinePattern: String(ins.timeline_pattern ?? ""),
+      specialIdeas: safeJsonParse<string[]>(String(ins.special_ideas_json ?? "[]"), []),
+      pitfalls: safeJsonParse<string[]>(String(ins.pitfalls_json ?? "[]"), []),
+      updatedAt: String(ins.updated_at),
     }));
 
     const forms = (
@@ -1110,6 +1451,8 @@ export class CampaignStore {
       campaignId: String(f.campaign_id),
       title: String(f.title),
       sourceUrl: String(f.source_url ?? ""),
+      sheetSyncUrl: String(f.sheet_sync_url ?? ""),
+      lastSyncedAt: String(f.last_synced_at ?? ""),
       status: (f.status === "closed" ? "closed" : "open") as "open" | "closed",
       description: String(f.description ?? ""),
       updatedAt: String(f.updated_at),
@@ -1169,6 +1512,8 @@ export class CampaignStore {
       notes,
       files,
       meetings,
+      partners,
+      inspirations,
       forms,
       formResponses,
       botMessages,
@@ -1176,7 +1521,7 @@ export class CampaignStore {
     };
   }
 
-  createCampaign(input: { name: string; subtitle?: string; eventDate: string; postWeeks?: number }): CampaignSnapshot {
+  createCampaign(input: { name: string; subtitle?: string; brief?: string; eventDate: string; postWeeks?: number }): CampaignSnapshot {
     const now = new Date().toISOString();
     const id = `camp-${randomUUID().slice(0, 8)}`;
     const postWeeks = Math.max(0, Math.min(4, input.postWeeks ?? 2));
@@ -1186,13 +1531,14 @@ export class CampaignStore {
       ? new Date(eventTime - prepCount * 7 * 86400_000)
       : new Date();
     const startIso = baseStart.toISOString().slice(0, 10);
+    const brief = (input.brief ?? "").trim();
 
     this.db
       .prepare(
-        `INSERT INTO campaigns (id, name, subtitle, event_date, start_date, post_weeks, pacing, main_goal, monthly_goals_json, sheet_url, slides_url, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'balanced', '', '[]', '', '', ?)`,
+        `INSERT INTO campaigns (id, name, subtitle, brief, event_date, start_date, post_weeks, pacing, main_goal, monthly_goals_json, sheet_url, slides_url, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'balanced', ?, '[]', '', '', ?)`,
       )
-      .run(id, input.name.trim(), (input.subtitle ?? "").trim(), input.eventDate, startIso, postWeeks, now);
+      .run(id, input.name.trim(), (input.subtitle ?? "").trim(), brief, input.eventDate, startIso, postWeeks, brief, now);
 
     const monthNames = ["一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月"];
     const totalWeeks = prepCount + 1 + postWeeks;
@@ -1243,24 +1589,36 @@ export class CampaignStore {
       )
       .run(`form-${randomUUID().slice(0, 8)}`, id, `${input.name.trim()} · 招工表單`, now);
 
+    this.seedInspirationsForCampaign(id, {
+      name: input.name.trim(),
+      subtitle: (input.subtitle ?? "").trim(),
+      brief,
+      mainGoal: brief,
+      teamNames: defaultTeams.map((t) => t.name),
+    });
+
+    const onboardingWelcome = brief
+      ? `歡迎開啟新專案「**${input.name.trim()}**」！我已讀到你的初步構想：「${brief}」，並先幫你策展了匹配的**靈感借鏡**活動案例。\n\n接下來想請你跟我聊聊：\n1. **預計參與人數與核心受眾**是誰？\n2. 活動當天有沒有**特別環節**（例如工作坊、市集攤位、Panel 與談、黑客松發表）？\n3. 有沒有已知的**死線或撞期時段**？\n\n直接回覆我，我就會為你量身設定專案性質、組別分工與靈感借鏡方向！`
+      : `歡迎開啟新專案「**${input.name.trim()}**」（活動日 ${input.eventDate}）！\n\n在開始細排之前，先跟我聊聊這場活動主要想做什麼吧：\n- **活動形式與規模**（例如：百人技術論壇、校園黑客松、品牌體驗展、音樂市集…）\n- **最想達成的核心體驗或目標**\n\n告訴我之後，我會直接幫你規劃專案定位、配置適合的組別與節奏，並在「**靈感借鏡**」頁面整理國內外相似活動的亮點與避坑提醒！`;
+
     this.db
       .prepare(
         `INSERT INTO bot_messages (id, campaign_id, role, content, proposals_json, created_at)
          VALUES (?, ?, 'assistant', ?, '[]', ?)`,
       )
-      .run(
-        `bot-${randomUUID().slice(0, 8)}`,
-        id,
-        `已為「${input.name.trim()}」建立倒數時程表與預設組別。你可以直接告訴我活動目標或每週事項，讓我幫你自動排程！`,
-        now,
-      );
+      .run(`bot-${randomUUID().slice(0, 8)}`, id, onboardingWelcome, now);
 
     return this.getSnapshot(id);
   }
 
   updateCampaignMeta(
     campaignId: string,
-    patch: Partial<Pick<CampaignMeta, "name" | "subtitle" | "eventDate" | "pacing" | "mainGoal" | "monthlyGoals" | "sheetUrl" | "slidesUrl">>,
+    patch: Partial<
+      Pick<
+        CampaignMeta,
+        "name" | "subtitle" | "brief" | "eventDate" | "pacing" | "mainGoal" | "monthlyGoals" | "sheetUrl" | "slidesUrl"
+      >
+    >,
   ): CampaignMeta {
     const snap = this.getSnapshot(campaignId);
     const cur = snap.campaign;
@@ -1269,6 +1627,7 @@ export class CampaignStore {
       ...cur,
       ...(patch.name !== undefined ? { name: patch.name.trim() || cur.name } : {}),
       ...(patch.subtitle !== undefined ? { subtitle: patch.subtitle.trim() } : {}),
+      ...(patch.brief !== undefined ? { brief: patch.brief.trim() } : {}),
       ...(patch.eventDate !== undefined ? { eventDate: patch.eventDate.trim() || cur.eventDate } : {}),
       ...(patch.pacing !== undefined ? { pacing: patch.pacing } : {}),
       ...(patch.mainGoal !== undefined ? { mainGoal: patch.mainGoal } : {}),
@@ -1281,12 +1640,13 @@ export class CampaignStore {
     this.db
       .prepare(
         `UPDATE campaigns
-         SET name = ?, subtitle = ?, event_date = ?, pacing = ?, main_goal = ?, monthly_goals_json = ?, sheet_url = ?, slides_url = ?, updated_at = ?
+         SET name = ?, subtitle = ?, brief = ?, event_date = ?, pacing = ?, main_goal = ?, monthly_goals_json = ?, sheet_url = ?, slides_url = ?, updated_at = ?
          WHERE id = ?`,
       )
       .run(
         next.name,
         next.subtitle,
+        next.brief,
         next.eventDate,
         next.pacing,
         next.mainGoal,
@@ -1701,6 +2061,35 @@ export class CampaignStore {
   }
 
   // ── Meetings ─────────────────────────────────────────────────────────────
+  getMeetingById(meetingId: string): { meeting: CampaignMeeting; campaignName: string } {
+    const row = this.db
+      .prepare(
+        `SELECT m.*, c.name AS campaign_name
+         FROM meetings m
+         JOIN campaigns c ON c.id = m.campaign_id
+         WHERE m.id = ?`,
+      )
+      .get(meetingId) as Record<string, unknown> | undefined;
+    if (!row) throw new AppError(404, "找不到指定的會議記錄。");
+    return {
+      campaignName: String(row.campaign_name ?? "BELL Campaign"),
+      meeting: {
+        id: String(row.id),
+        campaignId: String(row.campaign_id),
+        title: String(row.title),
+        meetingDate: String(row.meeting_date),
+        attendees: String(row.attendees ?? ""),
+        agenda: String(row.agenda ?? ""),
+        arrangements: String(row.arrangements ?? ""),
+        precautions: String(row.precautions ?? ""),
+        decisions: String(row.decisions ?? ""),
+        docUrl: String(row.doc_url ?? ""),
+        docSource: (["gdoc", "hackmd", "markdown"].includes(String(row.doc_source)) ? row.doc_source : "") as MeetingDocSource,
+        updatedAt: String(row.updated_at),
+      },
+    };
+  }
+
   saveMeeting(
     campaignId: string,
     input: {
@@ -1712,16 +2101,28 @@ export class CampaignStore {
       arrangements: string;
       precautions: string;
       decisions: string;
+      docUrl?: string;
+      docSource?: MeetingDocSource;
     },
   ): CampaignMeeting {
     const now = new Date().toISOString();
     const id = input.id || `mtg-${randomUUID().slice(0, 8)}`;
-    const exists = this.db.prepare("SELECT id FROM meetings WHERE id = ?").get(id);
-    if (exists) {
+    const existing = this.db.prepare("SELECT doc_url, doc_source FROM meetings WHERE id = ?").get(id) as
+      | { doc_url?: string; doc_source?: string }
+      | undefined;
+    const docUrl = input.docUrl !== undefined ? input.docUrl.trim() : String(existing?.doc_url ?? "");
+    const docSource: MeetingDocSource =
+      input.docSource !== undefined
+        ? input.docSource
+        : (["gdoc", "hackmd", "markdown"].includes(String(existing?.doc_source ?? ""))
+            ? (existing?.doc_source as MeetingDocSource)
+            : "");
+
+    if (existing) {
       this.db
         .prepare(
           `UPDATE meetings
-           SET title = ?, meeting_date = ?, attendees = ?, agenda = ?, arrangements = ?, precautions = ?, decisions = ?, updated_at = ?
+           SET title = ?, meeting_date = ?, attendees = ?, agenda = ?, arrangements = ?, precautions = ?, decisions = ?, doc_url = ?, doc_source = ?, updated_at = ?
            WHERE id = ?`,
         )
         .run(
@@ -1732,14 +2133,16 @@ export class CampaignStore {
           input.arrangements,
           input.precautions,
           input.decisions,
+          docUrl,
+          docSource,
           now,
           id,
         );
     } else {
       this.db
         .prepare(
-          `INSERT INTO meetings (id, campaign_id, title, meeting_date, attendees, agenda, arrangements, precautions, decisions, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO meetings (id, campaign_id, title, meeting_date, attendees, agenda, arrangements, precautions, decisions, doc_url, doc_source, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -1751,6 +2154,8 @@ export class CampaignStore {
           input.arrangements,
           input.precautions,
           input.decisions,
+          docUrl,
+          docSource,
           now,
         );
     }
@@ -1764,6 +2169,8 @@ export class CampaignStore {
       arrangements: input.arrangements,
       precautions: input.precautions,
       decisions: input.decisions,
+      docUrl,
+      docSource,
       updatedAt: now,
     };
   }
@@ -1772,16 +2179,191 @@ export class CampaignStore {
     this.db.prepare("DELETE FROM meetings WHERE id = ?").run(meetingId);
   }
 
+  // ── Partners (`#/partners`: 講者 · 合作廠商 · 臨時工) ─────────────────────
+  savePartner(
+    campaignId: string,
+    input: {
+      id?: string;
+      kind: PartnerKind;
+      name: string;
+      organization?: string;
+      roleOrTopic?: string;
+      contact?: string;
+      teamId?: string | null;
+      status?: PartnerStatus;
+      shiftOrFee?: string;
+      notes?: string;
+      tasks?: TempStaffTask[];
+    },
+  ): CampaignPartner {
+    const now = new Date().toISOString();
+    const id = input.id || `pt-${randomUUID().slice(0, 8)}`;
+    const existing = this.db.prepare("SELECT * FROM partners WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    const status = input.status ?? ((existing?.status as PartnerStatus | undefined) || "prospect");
+    const tasks =
+      input.tasks ??
+      (existing ? safeJsonParse<TempStaffTask[]>(String(existing.tasks_json ?? "[]"), []) : []);
+
+    if (existing) {
+      this.db
+        .prepare(
+          `UPDATE partners
+           SET kind = ?, name = ?, organization = ?, role_or_topic = ?, contact = ?, team_id = ?, status = ?, shift_or_fee = ?, notes = ?, tasks_json = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          input.kind,
+          input.name.trim(),
+          (input.organization ?? "").trim(),
+          (input.roleOrTopic ?? "").trim(),
+          (input.contact ?? "").trim(),
+          input.teamId ?? null,
+          status,
+          (input.shiftOrFee ?? "").trim(),
+          input.notes ?? "",
+          JSON.stringify(tasks),
+          now,
+          id,
+        );
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO partners (id, campaign_id, kind, name, organization, role_or_topic, contact, team_id, status, shift_or_fee, notes, tasks_json, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          campaignId,
+          input.kind,
+          input.name.trim(),
+          (input.organization ?? "").trim(),
+          (input.roleOrTopic ?? "").trim(),
+          (input.contact ?? "").trim(),
+          input.teamId ?? null,
+          status,
+          (input.shiftOrFee ?? "").trim(),
+          input.notes ?? "",
+          JSON.stringify(tasks),
+          now,
+        );
+    }
+
+    return {
+      id,
+      campaignId,
+      kind: input.kind,
+      name: input.name.trim(),
+      organization: (input.organization ?? "").trim(),
+      roleOrTopic: (input.roleOrTopic ?? "").trim(),
+      contact: (input.contact ?? "").trim(),
+      teamId: input.teamId ?? null,
+      status,
+      shiftOrFee: (input.shiftOrFee ?? "").trim(),
+      notes: input.notes ?? "",
+      tasks,
+      updatedAt: now,
+    };
+  }
+
+  patchPartner(
+    partnerId: string,
+    patch: {
+      status?: PartnerStatus;
+      teamId?: string | null;
+      notes?: string;
+      tasks?: TempStaffTask[];
+    },
+  ): void {
+    const existing = this.db.prepare("SELECT * FROM partners WHERE id = ?").get(partnerId) as Record<string, unknown> | undefined;
+    if (!existing) throw new AppError(404, "找不到指定的合作名單項目。");
+    const now = new Date().toISOString();
+    const nextTasks =
+      patch.tasks !== undefined
+        ? patch.tasks
+        : safeJsonParse<TempStaffTask[]>(String(existing.tasks_json ?? "[]"), []);
+    this.db
+      .prepare(
+        `UPDATE partners
+         SET status = ?, team_id = ?, notes = ?, tasks_json = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        patch.status ?? String(existing.status ?? "prospect"),
+        patch.teamId !== undefined ? patch.teamId : (existing.team_id ? String(existing.team_id) : null),
+        patch.notes !== undefined ? patch.notes : String(existing.notes ?? ""),
+        JSON.stringify(nextTasks),
+        now,
+        partnerId,
+      );
+  }
+
+  deletePartner(partnerId: string): void {
+    this.db.prepare("DELETE FROM partners WHERE id = ?").run(partnerId);
+  }
+
+  // ── Inspirations (`#/inspirations`: 靈感借鏡) ────────────────────────────
+  replaceInspirations(
+    campaignId: string,
+    items: Array<Omit<CampaignInspiration, "id" | "campaignId" | "updatedAt">>,
+  ): void {
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM inspirations WHERE campaign_id = ?").run(campaignId);
+      const ins = this.db.prepare(
+        `INSERT INTO inspirations (id, campaign_id, title, region, category, similarity_score, why_similar, timeline_pattern, special_ideas_json, pitfalls_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const item of items) {
+        ins.run(
+          `insp-${randomUUID().slice(0, 8)}`,
+          campaignId,
+          item.title.trim(),
+          item.region,
+          item.category.trim(),
+          Math.max(1, Math.min(99, Math.round(item.similarityScore))),
+          item.whySimilar.trim(),
+          item.timelinePattern.trim(),
+          JSON.stringify(item.specialIdeas),
+          JSON.stringify(item.pitfalls),
+          now,
+        );
+      }
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  deleteInspiration(inspirationId: string): void {
+    this.db.prepare("DELETE FROM inspirations WHERE id = ?").run(inspirationId);
+  }
+
   // ── Recruitment Forms & Responses ────────────────────────────────────────
-  updateFormMeta(formId: string, patch: { title?: string; sourceUrl?: string; status?: "open" | "closed"; description?: string }): void {
+  updateFormMeta(
+    formId: string,
+    patch: {
+      title?: string;
+      sourceUrl?: string;
+      sheetSyncUrl?: string;
+      lastSyncedAt?: string;
+      status?: "open" | "closed";
+      description?: string;
+    },
+  ): void {
     const row = this.db.prepare("SELECT * FROM forms WHERE id = ?").get(formId) as Record<string, unknown> | undefined;
     if (!row) throw new AppError(404, "找不到指定的招工表單。");
     const now = new Date().toISOString();
     this.db
-      .prepare("UPDATE forms SET title = ?, source_url = ?, status = ?, description = ?, updated_at = ? WHERE id = ?")
+      .prepare(
+        "UPDATE forms SET title = ?, source_url = ?, sheet_sync_url = ?, last_synced_at = ?, status = ?, description = ?, updated_at = ? WHERE id = ?",
+      )
       .run(
         patch.title !== undefined ? patch.title.trim() || String(row.title) : String(row.title),
         patch.sourceUrl !== undefined ? patch.sourceUrl.trim() : String(row.source_url ?? ""),
+        patch.sheetSyncUrl !== undefined ? patch.sheetSyncUrl.trim() : String(row.sheet_sync_url ?? ""),
+        patch.lastSyncedAt !== undefined ? patch.lastSyncedAt : String(row.last_synced_at ?? ""),
         patch.status ?? String(row.status ?? "open"),
         patch.description !== undefined ? patch.description : String(row.description ?? ""),
         now,
@@ -1884,16 +2466,35 @@ export class CampaignStore {
     const fallbackTeamId = snap.teams[0]?.id;
     if (!fallbackTeamId) throw new AppError(400, "請先建立至少一個組別再匯入招工回覆。");
 
+    const existingEmails = new Set(
+      snap.formResponses
+        .filter((r) => r.formId === formId && r.email.trim())
+        .map((r) => r.email.trim().toLowerCase()),
+    );
+    const existingNames = new Set(
+      snap.formResponses
+        .filter((r) => r.formId === formId)
+        .map((r) => r.applicantName.trim().toLowerCase()),
+    );
+
     let imported = 0;
     for (let r = 1; r < grid.length; r++) {
       const row = grid[r];
       const name = (row[nameIdx] ?? "").trim();
       if (!name) continue;
+      const email = emailIdx >= 0 ? (row[emailIdx] ?? "").trim() : "";
+      if ((email && existingEmails.has(email.toLowerCase())) || existingNames.has(name.toLowerCase())) {
+        continue;
+      }
+      if (email) existingEmails.add(email.toLowerCase());
+      existingNames.add(name.toLowerCase());
+
       const rawTeam = teamIdx >= 0 ? (row[teamIdx] ?? "").trim() : "";
-      const matchedTeam = snap.teams.find((t) => rawTeam.includes(t.name) || t.name.includes(rawTeam)) ?? snap.teams[0];
+      const matchedTeam =
+        snap.teams.find((t) => rawTeam && (rawTeam.includes(t.name) || t.name.includes(rawTeam))) ?? snap.teams[0];
       this.addFormResponse(formId, {
         applicantName: name,
-        email: emailIdx >= 0 ? row[emailIdx] : "",
+        email,
         handle: handleIdx >= 0 ? row[handleIdx] : "",
         preferredTeamId: matchedTeam.id,
         skills: skillIdx >= 0 && row[skillIdx] ? row[skillIdx].split(/[,、/，;]+/) : ["熱忱支援"],

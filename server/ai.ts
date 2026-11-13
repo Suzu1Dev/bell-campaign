@@ -9,12 +9,14 @@ import {
   type AutoScheduleInput,
   type AutoSchedulePreview,
   type BotActionProposal,
+  type CampaignInspiration,
   type CampaignSnapshot,
   type CellStage,
   type HandbookTemplate,
   type PacingLevel,
   type ProviderSettings,
 } from "../shared/types.js";
+import { curateComparableEvents } from "../shared/docs.js";
 import { buildPacingSchedulePreview, computeCampaignMetrics } from "../shared/sheets.js";
 import { AppError } from "./errors.js";
 
@@ -561,6 +563,7 @@ export async function replyCampaignBot(
 你是 BELL Campaign 的個人專案助理 Campaign Bot，能與使用者對話並協助操作整個活動專案（調整時程緊湊度、新增或完成待辦、標記撞期事件、建立會議大綱、記錄個人筆記、生成講者／籌備行前手冊、審核招工表單）。
 請以繁體中文精練回覆，並視使用者意圖附帶 0–3 個可一鍵執行的結構化操作 proposals。
 支援的 proposal kind 與 payload：
+- "setup_project_brief": { "brief": "專案性質定位", "mainGoal": "核心目標", "subtitle": "副標題" }
 - "adjust_pacing": { "pacing": "relaxed|steady|balanced|compact|intense" }
 - "add_todo": { "teamId": "...", "weekId": "...", "title": "...", "priority": "normal|high" }
 - "toggle_todo": { "todoId": "...", "done": true }
@@ -569,6 +572,7 @@ export async function replyCampaignBot(
 - "create_note": { "title": "...", "body": "..." }
 - "generate_handbook": { "template": "staff_lazy_pack|speaker_handbook|speaker_reminder|vendor_brief", "recipientName": "..." }
 - "update_applicant": { "responseId": "...", "status": "accepted|interview|waitlist|declined", "reviewerNote": "..." }
+- "add_partner": { "kind": "speaker|vendor|temp_staff", "name": "...", "organization": "...", "roleOrTopic": "...", "shiftOrFee": "..." }
 
 回傳純 JSON：
 {
@@ -614,6 +618,50 @@ ${JSON.stringify({
 
   // Built-in intelligent intent & multi-module operation engine
   const replyLines: string[] = [];
+
+  // 0. New Project Positioning / Brief Onboarding & Similar-Event Inspiration Curation
+  const isNewProjectBlank = !snapshot.campaign.brief.trim() && snapshot.todos.length === 0;
+  if (
+    /想辦|打算辦|專案主要|活動性質|定位|受眾|規模|黑客松|工作坊|市集|展覽|音樂節|論壇|研討會|靈感|借鏡|相似活動/.test(msg) ||
+    (isNewProjectBlank && msg.length >= 10 && !/緊湊|手冊|招工|會議/.test(msg))
+  ) {
+    const cleanBrief = msg.replace(/^(我們|我)?(想辦|打算辦|規劃|專案主要是)[:：\s]*/, "").trim();
+    proposals.push({
+      id: `prop-${randomUUID().slice(0, 8)}`,
+      kind: "setup_project_brief",
+      summary: "套用專案性質定位並更新「靈感借鏡」相似活動分析",
+      detail: `定位摘要：${cleanBrief.slice(0, 48)}`,
+      payload: {
+        brief: cleanBrief.slice(0, 300),
+        mainGoal: snapshot.campaign.mainGoal || cleanBrief.slice(0, 240),
+      },
+      applied: false,
+    });
+    replyLines.push(
+      `太好了！我已根據你的描述整理出專案性質定位：「**${cleanBrief.slice(0, 60)}**」。\n點擊下方按鈕套用後，系統會同步寫入專案核心目標，並在「**靈感借鏡**」頁面為你匹配國內外相似活動的**時程巧思、亮點企劃與前人避坑提醒**！`,
+    );
+  }
+
+  // 0b. Partner / Speaker / Vendor / Temp Staff quick add
+  if (/合作名單|新增講者|邀請講者|新增廠商|合作廠商|臨時工/.test(msg) && !/手冊/.test(msg)) {
+    const kind = /臨時工/.test(msg) ? "temp_staff" : /廠商|外燴|音響|印刷/.test(msg) ? "vendor" : "speaker";
+    const kindLabel = kind === "temp_staff" ? "臨時工" : kind === "vendor" ? "合作廠商" : "特邀講者";
+    const nameMatch = /(?:講者|廠商|臨時工)[「『:：\s]*([^\s，,。、」』]{2,16})/.exec(msg);
+    const partnerName = nameMatch ? nameMatch[1] : `待確認${kindLabel}`;
+    proposals.push({
+      id: `prop-${randomUUID().slice(0, 8)}`,
+      kind: "add_partner",
+      summary: `加入合作名單（${kindLabel}）：${partnerName}`,
+      detail: msg.slice(0, 56),
+      payload: {
+        kind,
+        name: partnerName,
+        roleOrTopic: msg.slice(0, 80),
+      },
+      applied: false,
+    });
+    replyLines.push(`已準備將「**${partnerName}**」加入合作名單的「**${kindLabel}**」分區追蹤。`);
+  }
 
   // 1. Pacing / Auto-schedule adjustment
   if (/緊湊|鬆|緊|節奏|排程|緩衝|pacing/.test(msg)) {
@@ -826,4 +874,78 @@ ${JSON.stringify({
     content: replyLines.join("\n"),
     proposals,
   };
+}
+
+export async function curateInspirationsWithAI(
+  snapshot: CampaignSnapshot,
+  focusHint: string,
+  settings: ProviderSettings,
+  signal: AbortSignal,
+  runner: JsonPromptRunner = defaultJsonRunner,
+): Promise<Array<Omit<CampaignInspiration, "id" | "campaignId" | "updatedAt">>> {
+  const baseline = curateComparableEvents({
+    campaignId: snapshot.campaign.id,
+    name: snapshot.campaign.name,
+    subtitle: snapshot.campaign.subtitle,
+    brief: snapshot.campaign.brief,
+    mainGoal: snapshot.campaign.mainGoal,
+    teamNames: snapshot.teams.map((t) => t.name),
+    focusHint,
+  }).map(({ campaignId: _cid, ...rest }) => rest);
+
+  if (settings.provider === "builtin") {
+    return baseline;
+  }
+
+  try {
+    const prompt = `${UNTRUSTED_BOUNDARY}
+你是 BELL Campaign 資深活動策展顧問。請根據下方目前活動專案的性質與補充方向，挑選 4 個真實且具代表性的國內外相似活動案例，分析相似處、時程安排巧思、可借鏡的特別活動企劃，以及前人踩過的坑（避坑指南）。
+回傳純 JSON：
+{
+  "cases": [
+    {
+      "title": "活動名稱",
+      "region": "國內|國際",
+      "category": "類型短標籤",
+      "similarityScore": 88,
+      "whySimilar": "與本專案的相似處分析",
+      "timelinePattern": "時程推進上的特別安排方式",
+      "specialIdeas": ["點子1", "點子2"],
+      "pitfalls": ["不能踩的坑1", "不能踩的坑2"]
+    }
+  ]
+}
+
+目前專案資訊：
+${JSON.stringify({
+  name: snapshot.campaign.name,
+  subtitle: snapshot.campaign.subtitle,
+  brief: snapshot.campaign.brief,
+  mainGoal: snapshot.campaign.mainGoal,
+  teams: snapshot.teams.map((t) => t.name),
+  focusHint,
+})}`;
+
+    const raw = await runner(prompt, settings, signal);
+    if (!raw || typeof raw !== "object") return baseline;
+    const cases = (raw as { cases?: unknown }).cases;
+    if (!Array.isArray(cases) || cases.length === 0) return baseline;
+    const parsed = cases
+      .filter((c): c is Record<string, unknown> => Boolean(c && typeof c === "object" && typeof c.title === "string"))
+      .slice(0, 6)
+      .map((c) => ({
+        title: String(c.title).trim().slice(0, 80),
+        region: (c.region === "國際" ? "國際" : "國內") as "國內" | "國際",
+        category: String(c.category ?? "標竿活動").trim().slice(0, 32),
+        similarityScore: Math.max(50, Math.min(99, Number(c.similarityScore) || 85)),
+        whySimilar: String(c.whySimilar ?? "").trim().slice(0, 300),
+        timelinePattern: String(c.timelinePattern ?? "").trim().slice(0, 300),
+        specialIdeas: Array.isArray(c.specialIdeas) ? c.specialIdeas.map((s) => String(s).trim()).filter(Boolean).slice(0, 4) : [],
+        pitfalls: Array.isArray(c.pitfalls) ? c.pitfalls.map((s) => String(s).trim()).filter(Boolean).slice(0, 4) : [],
+      }))
+      .filter((c) => c.title && c.whySimilar);
+    return parsed.length > 0 ? parsed : baseline;
+  } catch {
+    return baseline;
+  }
 }

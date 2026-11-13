@@ -6,9 +6,13 @@ export type PacingLevel = (typeof PACING_LEVELS)[number];
 
 export const CELL_STAGES = [
   "待排",
+  "進度20%",
   "進度25%",
+  "進度40%",
   "進度50%",
+  "進度60%",
   "進度75%",
+  "進度80%",
   "進度100%",
   "Debug",
   "RC",
@@ -31,6 +35,19 @@ export type ApplicantStatus = (typeof APPLICANT_STATUSES)[number];
 
 export const APPLICANT_ROLES = ["core", "staff", "day_volunteer"] as const;
 export type ApplicantRole = (typeof APPLICANT_ROLES)[number];
+
+export const PARTNER_KINDS = ["speaker", "vendor", "temp_staff"] as const;
+export type PartnerKind = (typeof PARTNER_KINDS)[number];
+
+export const PARTNER_STATUSES = [
+  "prospect",
+  "contacting",
+  "confirmed",
+  "briefed",
+  "completed",
+  "declined",
+] as const;
+export type PartnerStatus = (typeof PARTNER_STATUSES)[number];
 
 export interface PacingMeta {
   id: PacingLevel;
@@ -119,6 +136,7 @@ export interface CampaignSummary {
 }
 
 export interface CampaignMeta extends CampaignSummary {
+  brief: string;
   mainGoal: string;
   monthlyGoals: MonthlyGoal[];
   sheetUrl: string;
@@ -199,6 +217,8 @@ export interface CampaignFile {
   updatedAt: string;
 }
 
+export type MeetingDocSource = "" | "gdoc" | "hackmd" | "markdown";
+
 export interface CampaignMeeting {
   id: string;
   campaignId: string;
@@ -209,6 +229,44 @@ export interface CampaignMeeting {
   arrangements: string;
   precautions: string;
   decisions: string;
+  docUrl: string;
+  docSource: MeetingDocSource;
+  updatedAt: string;
+}
+
+export interface TempStaffTask {
+  id: string;
+  title: string;
+  done: boolean;
+}
+
+export interface CampaignPartner {
+  id: string;
+  campaignId: string;
+  kind: PartnerKind;
+  name: string;
+  organization: string;
+  roleOrTopic: string;
+  contact: string;
+  teamId: string | null;
+  status: PartnerStatus;
+  shiftOrFee: string;
+  notes: string;
+  tasks: TempStaffTask[];
+  updatedAt: string;
+}
+
+export interface CampaignInspiration {
+  id: string;
+  campaignId: string;
+  title: string;
+  region: "國內" | "國際";
+  category: string;
+  similarityScore: number;
+  whySimilar: string;
+  timelinePattern: string;
+  specialIdeas: string[];
+  pitfalls: string[];
   updatedAt: string;
 }
 
@@ -217,6 +275,8 @@ export interface RecruitmentForm {
   campaignId: string;
   title: string;
   sourceUrl: string;
+  sheetSyncUrl: string;
+  lastSyncedAt: string;
   status: "open" | "closed";
   description: string;
   updatedAt: string;
@@ -241,6 +301,7 @@ export interface FormResponseItem {
 }
 
 export type BotActionKind =
+  | "setup_project_brief"
   | "adjust_pacing"
   | "auto_schedule"
   | "add_todo"
@@ -249,7 +310,8 @@ export type BotActionKind =
   | "create_meeting"
   | "create_note"
   | "generate_handbook"
-  | "update_applicant";
+  | "update_applicant"
+  | "add_partner";
 
 export interface BotActionProposal {
   id: string;
@@ -312,6 +374,8 @@ export interface CampaignSnapshot {
   notes: CampaignNote[];
   files: CampaignFile[];
   meetings: CampaignMeeting[];
+  partners: CampaignPartner[];
+  inspirations: CampaignInspiration[];
   forms: RecruitmentForm[];
   formResponses: FormResponseItem[];
   botMessages: BotMessage[];

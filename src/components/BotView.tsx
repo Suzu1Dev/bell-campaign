@@ -19,7 +19,7 @@ import { computeCampaignMetrics } from "../../shared/sheets";
 import { apiWrite } from "../lib/api";
 
 const PROVIDER_LABELS: Record<AiProvider, string> = {
-  builtin: "內建排程引擎（零延遲）",
+  builtin: "內建規則引擎（免金鑰・即時回應）",
   codex: "Codex CLI",
   claude: "Claude CLI",
   antigravity: "Antigravity CLI",
@@ -27,6 +27,10 @@ const PROVIDER_LABELS: Record<AiProvider, string> = {
 };
 
 const QUICK_PROMPTS = [
+  {
+    label: "對焦專案性質與靈感借鏡",
+    prompt: "我們這次專案預計舉辦 160 人的跨域社群交流活動，包含主題與談與圓桌互動，請幫我規劃專案性質定位並更新靈感借鏡案例。",
+  },
   {
     label: "微調時程緊湊度",
     prompt: "幫我把整體排程調整成穩健緩衝節奏，避開撞期大活動並保留兩週驗收緩衝。",
@@ -42,10 +46,6 @@ const QUICK_PROMPTS = [
   {
     label: "擬定下次週會大綱",
     prompt: "請幫我建立本週籌備週會的會前大綱、議程安排與注意事項。",
-  },
-  {
-    label: "新增跨組待辦事項",
-    prompt: "幫行銷與設計組新增待辦：輸出主舞台 16:9 轉場投影片與桌牌完稿。",
   },
 ] as const;
 
@@ -374,6 +374,11 @@ export default function BotView({
                 </option>
               ))}
             </select>
+            <div style={{ fontSize: 12, color: "var(--text-3)", lineHeight: 1.5, marginTop: 6 }}>
+              {snapshot.settings.provider === "builtin"
+                ? "預設採用本地端結構化排程與規則引擎，免設定 API 金鑰、無外部網路等待即可操作時程、手冊與名單；亦可切換為外部大模型。"
+                : "將透過外部 CLI 或 API 大語言模型生成回覆，若外部服務連線逾時會自動回退至內建引擎保底。"}
+            </div>
           </div>
           {snapshot.settings.provider !== "builtin" && (
             <div style={{ display: "flex", gap: 6 }}>
