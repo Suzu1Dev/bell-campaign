@@ -1289,20 +1289,31 @@ select:focus-visible {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-height: 46px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--line);
 }
 
-.p-command-search input {
+.p-command-search input,
+.p-command-search input:focus,
+.p-command-search input:focus-visible {
   flex: 1;
-  border: none;
-  background: transparent;
+  min-width: 0;
+  border: 0 !important;
+  outline: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+  color: var(--text);
+  caret-color: var(--campaign-text);
   font-size: 14px;
-  outline: none;
+}
+
+.p-command-search input::placeholder {
+  color: var(--text-3);
 }
 
 .p-command-list {
-  max-height: 320px;
+  max-height: 340px;
   overflow-y: auto;
   padding: 6px;
 }
@@ -1318,6 +1329,7 @@ select:focus-visible {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-height: 52px;
   padding: 8px 10px;
   border-radius: var(--radius-sm);
   cursor: pointer;
