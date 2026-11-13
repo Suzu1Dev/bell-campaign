@@ -2,8 +2,8 @@ class BellCampaign < Formula
   desc "Local-first weekly countdown timeline, team progress, and event operations workspace"
   homepage "https://github.com/Suzu1Dev/bell-campaign"
   url "https://github.com/Suzu1Dev/bell-campaign/archive/refs/heads/main.tar.gz"
-  version "1.0.0"
-  license "MIT"
+  version "1.0.1"
+  license "Apache-2.0"
   head "https://github.com/Suzu1Dev/bell-campaign.git", branch: "main"
 
   depends_on "node"
