@@ -190,6 +190,7 @@ const createWeekSchema = z
     dateRange: z.string().trim().min(1).max(32),
     countdownLabel: z.string().trim().min(1).max(32),
     phase: z.enum(["prep", "event", "post"]),
+    stage: z.enum(CELL_STAGES).optional(),
   })
   .strict();
 
@@ -199,6 +200,7 @@ const patchWeekSchema = z
     dateRange: z.string().trim().min(1).max(32).optional(),
     countdownLabel: z.string().trim().min(1).max(32).optional(),
     phase: z.enum(["prep", "event", "post"]).optional(),
+    stage: z.enum(CELL_STAGES).optional(),
     majorEvents: z
       .array(
         z
@@ -416,6 +418,16 @@ const autoScheduleApplySchema = z
       .optional(),
     preview: z
       .object({
+        weekStages: z
+          .array(
+            z
+              .object({
+                weekId: z.string().min(1),
+                stage: z.enum(CELL_STAGES),
+              })
+              .strict(),
+          )
+          .optional(),
         cells: z.array(
           z
             .object({

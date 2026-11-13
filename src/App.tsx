@@ -78,7 +78,7 @@ function getInitialTheme(): "light" | "dark" {
 }
 
 const ROUTE_TITLES: Record<RouteKey, { title: string; subtitle: string }> = {
-  schedule: { title: "每週倒數時程總表", subtitle: "對齊 Google 試算表結構 · 連續階段橫條與撞期避開" },
+  schedule: { title: "每週倒數時程總表", subtitle: "對齊 Google 試算表結構 · 頂部整體進度軸與撞期避開" },
   tasks: { title: "待辦事項與各組進度", subtitle: "追蹤各大組別專案進度與待辦完成率" },
   partners: { title: "合作名單與臨時工編制", subtitle: "分類管理特邀講者、合作廠商接洽與臨時工任務完成狀況" },
   forms: { title: "招工表單與人力雷達", subtitle: "視覺化審核志工回覆、試算表同步與各組缺口" },

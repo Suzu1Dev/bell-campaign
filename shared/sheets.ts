@@ -32,6 +32,25 @@ export function stageToPercent(stage: CellStage): number {
   return STAGE_PROGRESS_MAP[stage] ?? 0;
 }
 
+export function defaultWeekStage(
+  phase: "prep" | "event" | "post",
+  prepIdx: number,
+  prepCount: number,
+): CellStage {
+  if (phase === "event") return "活動";
+  if (phase === "post") return "復盤";
+  const bufferCount = prepCount >= 5 ? 2 : prepCount >= 3 ? 1 : 0;
+  const activeCount = Math.max(1, prepCount - bufferCount);
+  if (prepIdx >= activeCount) {
+    return prepIdx === prepCount - 1 && bufferCount >= 1 ? "RC" : "Debug";
+  }
+  const ratio = (prepIdx + 1) / activeCount;
+  if (ratio <= 0.25) return "進度25%";
+  if (ratio <= 0.5) return "進度50%";
+  if (ratio <= 0.75) return "進度75%";
+  return "進度100%";
+}
+
 export interface CampaignMetrics {
   overallPercent: number;
   completedTodos: number;
@@ -84,6 +103,8 @@ export function computeCampaignMetrics(snapshot: Pick<CampaignSnapshot, "weeks" 
       percent = Math.max(0, Math.min(100, Math.round(week.progressOverride)));
     } else if (total > 0) {
       percent = Math.round((done / total) * 100);
+    } else if (week.stage && week.stage !== "待排") {
+      percent = stageToPercent(week.stage);
     } else if (snapshot.teams.length > 0) {
       const sum = snapshot.teams.reduce((acc, team) => {
         const st = cellMap.get(`${week.id}:${team.id}`) ?? "待排";
@@ -188,6 +209,7 @@ export interface ParsedGoogleSheetCampaign {
     dateRange: string;
     countdownLabel: string;
     phase: "prep" | "event" | "post";
+    stage: CellStage;
     majorEvents: WeekEventItem[];
     memo: string;
     progressOverride: number | null;
@@ -207,7 +229,7 @@ export interface ParsedGoogleSheetCampaign {
 
 /**
  * Parses the BELL Campaign / Google Sheets weekly countdown layout
- * (matching the reference spreadsheet: 月, 日期, 倒數週數, 主要排程, 備註, 整體進度, and multi-row team blocks).
+ * (matching the reference spreadsheet: 月, 日期, 倒數週數, 整體進度, 主要排程, 備註, and multi-row team blocks).
  */
 export function parseGoogleSheetCsv(csvText: string): ParsedGoogleSheetCampaign {
   const grid = parseCsvGrid(csvText);
@@ -231,7 +253,15 @@ export function parseGoogleSheetCsv(csvText: string): ParsedGoogleSheetCampaign 
     else if (label.includes("倒數")) countdownRowIdx = r;
     else if (label.includes("主要排程") || label.includes("重大事件") || label.includes("撞期")) majorEventRowIdx = r;
     else if (label.includes("備註")) memoRowIdx = r;
-    else if (label.includes("整體進度") || label.includes("總進度")) overallRowIdx = r;
+    else if (
+      label.includes("整體進度") ||
+      label.includes("專案進度") ||
+      label.includes("總進度") ||
+      (c0 === "" && c1 === "完成度") ||
+      (c0 === "完成度" && c1 === "")
+    ) {
+      overallRowIdx = r;
+    }
   }
 
   if (dateRowIdx < 0) dateRowIdx = 1;
@@ -285,9 +315,11 @@ export function parseGoogleSheetCsv(csvText: string): ParsedGoogleSheetCampaign 
     }));
 
     const memo = memoRowIdx >= 0 ? (grid[memoRowIdx]?.[col] ?? "").trim() : "";
+    const rawOverall = overallRowIdx >= 0 ? (grid[overallRowIdx]?.[col] ?? "").trim() : "";
+    const stage: CellStage = rawOverall ? normalizeStage(rawOverall) : "待排";
     let progressOverride: number | null = null;
-    if (overallRowIdx >= 0) {
-      const m = /(\d{1,3})\s*%/.exec(grid[overallRowIdx]?.[col] ?? "");
+    if (rawOverall && stage === "待排") {
+      const m = /(\d{1,3})\s*%/.exec(rawOverall);
       if (m) progressOverride = Math.min(100, Number(m[1]));
     }
 
@@ -296,6 +328,7 @@ export function parseGoogleSheetCsv(csvText: string): ParsedGoogleSheetCampaign 
       dateRange,
       countdownLabel,
       phase,
+      stage,
       majorEvents,
       memo,
       progressOverride,
@@ -312,7 +345,7 @@ export function parseGoogleSheetCsv(csvText: string): ParsedGoogleSheetCampaign 
     const teamCol = (row[0] ?? "").trim();
     const subCol = (row[1] ?? "").trim();
 
-    if (teamCol && !["倒數週數", "主要排程", "備註", "整體進度"].includes(teamCol)) {
+    if (teamCol && !["倒數週數", "主要排程", "備註", "整體進度", "專案進度"].includes(teamCol)) {
       currentTeam = {
         name: teamCol,
         color: TEAM_COLORS[teams.length % TEAM_COLORS.length],
@@ -352,6 +385,18 @@ export function parseGoogleSheetCsv(csvText: string): ParsedGoogleSheetCampaign 
     });
   }
 
+  // Lift legacy per-team repeated stages up to the unified top-level project progress row
+  const prepCount = weeks.filter((w) => w.phase === "prep").length;
+  let prepSeen = 0;
+  weeks.forEach((w, wIdx) => {
+    const isPrep = w.phase === "prep";
+    const curPrepIdx = prepSeen;
+    if (isPrep) prepSeen += 1;
+    if (w.stage !== "待排") return;
+    const lifted = teams.map((t) => t.cells[wIdx]?.stage ?? "待排").find((st) => st !== "待排");
+    w.stage = lifted ?? defaultWeekStage(w.phase, curPrepIdx, prepCount);
+  });
+
   return { weeks, teams };
 }
 
@@ -378,8 +423,8 @@ export function buildGoogleSheetMatrix(snapshot: CampaignSnapshot): string[][] {
   const countdownRow = ["倒數週數", "", ...orderedWeeks.map((w) => w.countdownLabel)];
   const progressRow = [
     "整體進度",
-    `總計 ${metrics.overallPercent}%`,
-    ...orderedWeeks.map((w) => `${metrics.weekProgress[w.id]?.percent ?? 0}%`),
+    `總完成 ${metrics.overallPercent}%`,
+    ...orderedWeeks.map((w) => w.stage),
   ];
   const majorRow = [
     "主要排程／撞期",
@@ -395,11 +440,6 @@ export function buildGoogleSheetMatrix(snapshot: CampaignSnapshot): string[][] {
   for (const team of orderedTeams) {
     rows.push([
       team.name,
-      "完成度",
-      ...orderedWeeks.map((w) => cellMap.get(`${w.id}:${team.id}`)?.stage ?? "待排"),
-    ]);
-    rows.push([
-      "",
       "本週進度",
       ...orderedWeeks.map((w) => cellMap.get(`${w.id}:${team.id}`)?.weeklyFocus ?? ""),
     ]);
@@ -464,7 +504,7 @@ export function buildWeeklyDigestText(snapshot: CampaignSnapshot): string {
   ];
 
   if (activeWeek) {
-    lines.push(`當前焦點週次：${activeWeek.countdownLabel}（${activeWeek.dateRange}）`);
+    lines.push(`當前焦點週次：${activeWeek.countdownLabel}（${activeWeek.dateRange} · 整體階段：${activeWeek.stage}）`);
     if (activeWeek.majorEvents.length > 0) {
       lines.push(
         `本週重要事件／撞期提醒：${activeWeek.majorEvents
@@ -482,7 +522,7 @@ export function buildWeeklyDigestText(snapshot: CampaignSnapshot): string {
       ? snapshot.cells.find((c) => c.weekId === activeWeek.id && c.teamId === team.id)
       : undefined;
     lines.push(
-      `• ${team.name}（${tp?.percent ?? 0}% · ${cell?.stage ?? tp?.latestStage ?? "推進中"}）${
+      `• ${team.name}（待辦 ${tp?.done ?? 0}/${tp?.total ?? 0} 完成）${
         cell?.weeklyFocus ? `：${cell.weeklyFocus}` : ""
       }`,
     );
@@ -533,9 +573,24 @@ export function buildStandaloneShareHtml(snapshot: CampaignSnapshot): string {
   const orderedTeams = [...snapshot.teams].sort((a, b) => a.orderIndex - b.orderIndex);
   const cellMap = new Map(snapshot.cells.map((c) => [`${c.weekId}:${c.teamId}`, c]));
 
+  const stageRuns: Array<{ stage: CellStage; count: number }> = [];
+  for (const w of orderedWeeks) {
+    const last = stageRuns[stageRuns.length - 1];
+    if (last && last.stage === w.stage) last.count += 1;
+    else stageRuns.push({ stage: w.stage, count: 1 });
+  }
+
+  const stageCols = stageRuns
+    .map(
+      (run) =>
+        `<th colspan="${run.count}" class="stage-head"><div class="stage-pill">${escapeHtml(run.stage)}${
+          run.count > 1 ? ` · 連續 ${run.count} 週` : ""
+        }</div></th>`,
+    )
+    .join("");
+
   const headerCols = orderedWeeks
     .map((w) => {
-      const wp = metrics.weekProgress[w.id];
       const conflicts = w.majorEvents
         .map(
           (e) =>
@@ -545,7 +600,6 @@ export function buildStandaloneShareHtml(snapshot: CampaignSnapshot): string {
       return `<th>
         <div class="month">${escapeHtml(w.monthLabel)} · ${escapeHtml(w.dateRange)}</div>
         <div class="cd">${escapeHtml(w.countdownLabel)}</div>
-        <div class="pct">${wp?.percent ?? 0}%</div>
         <div class="events">${conflicts}</div>
       </th>`;
     })
@@ -559,7 +613,6 @@ export function buildStandaloneShareHtml(snapshot: CampaignSnapshot): string {
           const cell = cellMap.get(`${w.id}:${team.id}`);
           const todos = snapshot.todos.filter((t) => t.teamId === team.id && t.weekId === w.id);
           return `<td>
-            <div class="stage">${escapeHtml(cell?.stage ?? "待排")}</div>
             ${cell?.weeklyFocus ? `<div class="focus">${escapeHtml(cell.weeklyFocus)}</div>` : ""}
             ${
               todos.length
@@ -575,7 +628,7 @@ export function buildStandaloneShareHtml(snapshot: CampaignSnapshot): string {
       return `<tr>
         <td class="team-col">
           <strong>${escapeHtml(team.name)}</strong>
-          <span>組長：${escapeHtml(team.lead || "待定")} · ${tp?.percent ?? 0}%</span>
+          <span>組長：${escapeHtml(team.lead || "待定")} · 待辦 ${tp?.done ?? 0}/${tp?.total ?? 0}</span>
         </td>
         ${tds}
       </tr>`;
@@ -598,15 +651,15 @@ export function buildStandaloneShareHtml(snapshot: CampaignSnapshot): string {
   table { border-collapse: collapse; width: 100%; min-width: 920px; font-size: 13px; }
   th, td { border-bottom: 1px solid rgba(15,17,21,.08); border-right: 1px solid rgba(15,17,21,.08); padding: 10px 12px; vertical-align: top; text-align: left; }
   th { background: #F2F3F6; min-width: 165px; }
+  .stage-head { background: #FFFFFF; padding: 8px 10px; }
+  .stage-pill { background: #F9ECF1; color: #9E2B5C; border: 1px solid rgba(158,43,92,.26); border-radius: 6px; padding: 5px 10px; font-weight: 600; font-size: 12px; }
   .team-col { position: sticky; left: 0; background: #FFFFFF; min-width: 150px; z-index: 1; }
   .team-col span { display: block; color: #636872; font-size: 12px; margin-top: 4px; }
   .month { font-size: 12px; color: #636872; font-weight: 500; }
   .cd { font-size: 14px; font-weight: 600; margin-top: 2px; }
-  .pct { font-size: 12px; color: #9E2B5C; margin-top: 2px; }
   .badge { display: inline-block; margin-top: 4px; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
   .badge.conflict { background: #FAF1E1; color: #8A5200; }
   .badge.milestone { background: #F9ECF1; color: #9E2B5C; }
-  .stage { font-weight: 600; color: #9E2B5C; font-size: 12px; margin-bottom: 4px; }
   .focus { font-weight: 500; margin-bottom: 6px; }
   .todos { margin: 0; padding: 0; list-style: none; color: #3B3F46; }
   .todos li { margin-bottom: 3px; }
@@ -624,7 +677,10 @@ export function buildStandaloneShareHtml(snapshot: CampaignSnapshot): string {
   </header>
   <div class="wrap">
     <table>
-      <thead><tr><th class="team-col">組別 ／ 週次</th>${headerCols}</tr></thead>
+      <thead>
+        <tr><th class="team-col stage-head">整體專案進度（${metrics.overallPercent}%）</th>${stageCols}</tr>
+        <tr><th class="team-col">組別 ／ 週次</th>${headerCols}</tr>
+      </thead>
       <tbody>${bodyRows}</tbody>
     </table>
   </div>
@@ -715,23 +771,33 @@ export function buildPacingSchedulePreview(
     });
   }
 
+  const weekStages: Array<{ weekId: string; stage: CellStage }> = [];
+  usablePrep.forEach((week, idx) => {
+    const inBuffer = idx >= activeCutoff;
+    const ratio = activeCutoff > 0 ? (idx + 1) / activeCutoff : 1;
+    let stage: CellStage = "進度25%";
+    if (inBuffer) {
+      stage = idx === usablePrep.length - 1 && meta.bufferWeeks >= 1 ? "RC" : "Debug";
+    } else if (ratio <= 0.25) {
+      stage = "進度25%";
+    } else if (ratio <= 0.5) {
+      stage = "進度50%";
+    } else if (ratio <= 0.75) {
+      stage = "進度75%";
+    } else {
+      stage = "進度100%";
+    }
+    weekStages.push({ weekId: week.id, stage });
+  });
+  if (eventWeek) weekStages.push({ weekId: eventWeek.id, stage: "活動" });
+  postWeeks.forEach((pw) => weekStages.push({ weekId: pw.id, stage: "復盤" }));
+  const weekStageMap = new Map(weekStages.map((ws) => [ws.weekId, ws.stage]));
+
   const cells: ProposedCellChange[] = [];
   for (const team of teams) {
     usablePrep.forEach((week, idx) => {
-      const ratio = usablePrep.length > 1 ? (idx + 1) / usablePrep.length : 1;
       const inBuffer = idx >= activeCutoff;
-      let stage: CellStage = "進度25%";
-      if (inBuffer) {
-        stage = idx === usablePrep.length - 1 && meta.bufferWeeks >= 1 ? "RC" : "Debug";
-      } else if (ratio <= 0.3) {
-        stage = "進度25%";
-      } else if (ratio <= 0.58) {
-        stage = "進度50%";
-      } else if (ratio <= 0.82) {
-        stage = "進度75%";
-      } else {
-        stage = "進度100%";
-      }
+      const stage = weekStageMap.get(week.id) ?? "進度50%";
 
       const weekTeamTodos = todos.filter((t) => t.teamId === team.id && t.weekId === week.id);
       const monthGoal = input.monthlyGoals.find((g) => week.monthLabel.includes(g.month) || g.month.includes(week.monthLabel));
@@ -797,6 +863,7 @@ export function buildPacingSchedulePreview(
       meta.bufferWeeks > 0 ? `並在活動前預留 ${meta.bufferWeeks} 週 Debug／RC 驗收緩衝` : "全週期高密度推進"
     }，共分配 ${todos.length} 項關鍵任務。`,
     avoidedConflictWeeks,
+    weekStages,
     cells,
     todos,
     weeklyLoadScores,

@@ -63,6 +63,10 @@ test("parseGoogleSheetCsv parses reference 籌備時程規劃-2026 spreadsheet a
   assert.equal(parsed.weeks[5].majorEvents[0]?.kind, "conflict");
   assert.equal(parsed.weeks[6].majorEvents[0]?.title, "8/8~8/9 COSCUP");
   assert.equal(parsed.weeks[6].majorEvents[0]?.kind, "conflict");
+  assert.deepEqual(
+    parsed.weeks.map((w) => w.stage),
+    ["進度25%", "進度50%", "進度75%", "進度100%", "Debug", "RC", "活動"],
+  );
 
   assert.equal(parsed.teams.length, 2);
   const cafe = parsed.teams[0];
@@ -83,11 +87,17 @@ test("Google Sheet matrix TSV/CSV export round-trips and Pacing engine avoids co
     const matrix = buildGoogleSheetMatrix(snap);
     const tsv = matrixToTsv(matrix);
     const csv = matrixToCsvBom(matrix);
-    assert.ok(tsv.includes("世界咖啡館\t完成度"));
+    assert.ok(tsv.includes("整體進度\t總完成"));
+    assert.ok(tsv.includes("世界咖啡館\t本週進度"));
+    assert.ok(!tsv.includes("世界咖啡館\t完成度"));
     assert.ok(csv.startsWith("\uFEFF"));
 
     const reparsed = parseGoogleSheetCsv(csv.slice(1));
     assert.equal(reparsed.weeks.length, snap.weeks.length);
+    assert.deepEqual(
+      reparsed.weeks.map((w) => w.stage),
+      snap.weeks.map((w) => w.stage),
+    );
     assert.equal(reparsed.teams.length, snap.teams.length);
 
     const tasksText = [

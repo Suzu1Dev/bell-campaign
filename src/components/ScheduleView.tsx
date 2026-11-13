@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   AlertTriangle,
@@ -43,6 +43,7 @@ import {
   buildWeeklyDigestText,
   computeCampaignMetrics,
   matrixToTsv,
+  stageToPercent,
 } from "../../shared/sheets";
 import { apiWrite } from "../lib/api";
 
@@ -92,26 +93,41 @@ export default function ScheduleView({
     return spans;
   }, [orderedWeeks]);
 
+  // Unified top-level project progress runs (merging consecutive identical stages into one continuous line)
+  const projectStageRuns = useMemo(() => {
+    const runs: Array<{ stage: CellStage; weeks: CampaignWeek[] }> = [];
+    for (const w of orderedWeeks) {
+      const st = w.stage ?? "待排";
+      const prev = runs[runs.length - 1];
+      if (prev && prev.stage === st) {
+        prev.weeks.push(w);
+      } else {
+        runs.push({ stage: st, weeks: [w] });
+      }
+    }
+    return runs;
+  }, [orderedWeeks]);
+
   // Dialog states
   const [aiOpen, setAiOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [shareTab, setShareTab] = useState<"sheets" | "slides" | "team">("sheets");
   const [slideIdx, setSlideIdx] = useState(0);
 
-  // Cell editor state
+  // Cell editor state (team weekly focus, cross-team & todos only — progress stage lives in unified top bar)
   const [editingCell, setEditingCell] = useState<{
     week: CampaignWeek;
     team: CampaignTeam;
-    stage: CellStage;
     weeklyFocus: string;
     crossTeam: string;
     newTodo: string;
-    spanCount: number;
   } | null>(null);
 
-  // Week editor state (dates, memo, milestones & clashing events)
+  // Week editor state (unified project progress stage, span, dates, memo, milestones & clashing events)
   const [editingWeek, setEditingWeek] = useState<{
     week: CampaignWeek;
+    stage: CellStage;
+    spanCount: number;
     monthLabel: string;
     dateRange: string;
     countdownLabel: string;
@@ -195,31 +211,37 @@ export default function ScheduleView({
     }
   }
 
+  function openWeekEditor(week: CampaignWeek, spanCount = 1) {
+    setEditingWeek({
+      week,
+      stage: week.stage ?? "待排",
+      spanCount,
+      monthLabel: week.monthLabel,
+      dateRange: week.dateRange,
+      countdownLabel: week.countdownLabel,
+      phase: week.phase,
+      memo: week.memo,
+      events: [...week.majorEvents],
+      newEventTitle: "",
+      newEventKind: "conflict",
+    });
+  }
+
   async function saveCellEdit() {
     if (!editingCell) return;
     try {
-      const startIdx = orderedWeeks.findIndex((w) => w.id === editingCell.week.id);
-      const targetWeeks =
-        startIdx >= 0 && editingCell.spanCount > 1
-          ? orderedWeeks.slice(startIdx, startIdx + editingCell.spanCount)
-          : [editingCell.week];
-
-      let next = snapshot;
-      for (let i = 0; i < targetWeeks.length; i += 1) {
-        const w = targetWeeks[i];
-        const existing = cellMap.get(`${w.id}:${editingCell.team.id}`);
-        next = await apiWrite<CampaignSnapshot>(
-          `/api/cells?campaignId=${encodeURIComponent(snapshot.campaign.id)}`,
-          "PUT",
-          {
-            weekId: w.id,
-            teamId: editingCell.team.id,
-            stage: editingCell.stage,
-            weeklyFocus: i === 0 ? editingCell.weeklyFocus : existing?.weeklyFocus ?? "",
-            crossTeam: i === 0 ? editingCell.crossTeam : existing?.crossTeam ?? "",
-          },
-        );
-      }
+      const existing = cellMap.get(`${editingCell.week.id}:${editingCell.team.id}`);
+      let next = await apiWrite<CampaignSnapshot>(
+        `/api/cells?campaignId=${encodeURIComponent(snapshot.campaign.id)}`,
+        "PUT",
+        {
+          weekId: editingCell.week.id,
+          teamId: editingCell.team.id,
+          stage: existing?.stage ?? editingCell.week.stage ?? "待排",
+          weeklyFocus: editingCell.weeklyFocus,
+          crossTeam: editingCell.crossTeam,
+        },
+      );
       if (editingCell.newTodo.trim()) {
         next = await apiWrite<CampaignSnapshot>(`/api/campaigns/${snapshot.campaign.id}/todos`, "POST", {
           teamId: editingCell.team.id,
@@ -229,7 +251,7 @@ export default function ScheduleView({
       }
       onSnapshot(next);
       setEditingCell(null);
-      notify(targetWeeks.length > 1 ? `已同步套用階段橫條至連續 ${targetWeeks.length} 週` : "已更新週次進度");
+      notify("已更新組別本週重點與待辦");
     } catch (err) {
       notify(err instanceof Error ? err.message : "儲存失敗");
     }
@@ -238,7 +260,7 @@ export default function ScheduleView({
   async function saveWeekEdit() {
     if (!editingWeek) return;
     try {
-      const next = await apiWrite<CampaignSnapshot>(
+      let next = await apiWrite<CampaignSnapshot>(
         `/api/weeks/${editingWeek.week.id}?campaignId=${encodeURIComponent(snapshot.campaign.id)}`,
         "PATCH",
         {
@@ -246,13 +268,31 @@ export default function ScheduleView({
           dateRange: editingWeek.dateRange,
           countdownLabel: editingWeek.countdownLabel,
           phase: editingWeek.phase,
+          stage: editingWeek.stage,
           memo: editingWeek.memo,
           majorEvents: editingWeek.events,
         },
       );
+
+      if (editingWeek.spanCount > 1) {
+        const startIdx = orderedWeeks.findIndex((w) => w.id === editingWeek.week.id);
+        const extraWeeks = startIdx >= 0 ? orderedWeeks.slice(startIdx + 1, startIdx + editingWeek.spanCount) : [];
+        for (const extra of extraWeeks) {
+          next = await apiWrite<CampaignSnapshot>(
+            `/api/weeks/${extra.id}?campaignId=${encodeURIComponent(snapshot.campaign.id)}`,
+            "PATCH",
+            { stage: editingWeek.stage },
+          );
+        }
+      }
+
       onSnapshot(next);
       setEditingWeek(null);
-      notify("已更新週次與撞期標記");
+      notify(
+        editingWeek.spanCount > 1
+          ? `已將整體專案進度「${editingWeek.stage}」拉成連續 ${editingWeek.spanCount} 週橫條`
+          : "已更新整體專案進度與週次設定",
+      );
     } catch (err) {
       notify(err instanceof Error ? err.message : "儲存週次失敗");
     }
@@ -286,6 +326,7 @@ export default function ScheduleView({
           mainGoal,
           monthlyGoals,
           preview: {
+            weekStages: livePreview.weekStages,
             cells: livePreview.cells,
             todos: livePreview.todos,
           },
@@ -483,12 +524,69 @@ export default function ScheduleView({
                 ))}
               </tr>
 
-              {/* Row 2: Week Dates, Countdown, Weekly %, and Major Events / Clashing Activities */}
+              {/* Row 2: Unified Project Completion Progress Ribbon across the Top */}
+              <tr className="project-progress-row">
+                <th className="sticky-col project-progress-sticky">
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4 }}>
+                    <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)", whiteSpace: "nowrap" }}>整體進度</span>
+                    <span className="pill pill-campaign tabular" style={{ height: 20, padding: "0 7px", fontSize: 11.5 }}>
+                      {metrics.overallPercent}%
+                    </span>
+                  </div>
+                  <div className="progress-track" style={{ height: 5, marginTop: 6 }}>
+                    <div className="progress-fill" style={{ width: `${metrics.overallPercent}%` }} />
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 4, fontWeight: 400 }}>
+                    總完成 {metrics.completedTodos}/{metrics.totalTodos} 待辦
+                  </div>
+                </th>
+
+                {projectStageRuns.map((run, rIdx) => {
+                  const firstWeek = run.weeks[0];
+                  const lastWeek = run.weeks[run.weeks.length - 1];
+                  const startDay = firstWeek.dateRange.split(/[–~-]/)[0]?.trim() ?? firstWeek.dateRange;
+                  const endDay = lastWeek.dateRange.split(/[–~-]/).pop()?.trim() ?? lastWeek.dateRange;
+                  const stagePct = stageToPercent(run.stage);
+                  const isFirst = rIdx === 0;
+                  const isLast = rIdx === projectStageRuns.length - 1;
+                  return (
+                    <th
+                      key={`proj-stage-${firstWeek.id}`}
+                      colSpan={run.weeks.length}
+                      className={`project-stage-th ${isFirst ? "is-first" : ""} ${isLast ? "is-last" : ""}`}
+                    >
+                      <button
+                        type="button"
+                        className={stageSpanClass(run.stage)}
+                        title="點擊調整此週期的整體專案完成進度階段"
+                        onClick={() => openWeekEditor(firstWeek, run.weeks.length)}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, width: "100%" }}>
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                            <span className="stage-node-dot" />
+                            <span>{run.stage}</span>
+                          </span>
+                          {run.weeks.length > 1 && (
+                            <span className="stage-span-meta">
+                              連續 {run.weeks.length} 週 · {startDay}–{endDay}
+                            </span>
+                          )}
+                        </div>
+                        <div className="stage-inline-track" aria-hidden="true">
+                          <div className="stage-inline-fill" style={{ width: `${stagePct}%` }} />
+                        </div>
+                      </button>
+                    </th>
+                  );
+                })}
+              </tr>
+
+              {/* Row 3: Week Countdown, Dates, and Major Events / Clashing Activities */}
               <tr>
-                <th className="sticky-col" style={{ padding: "12px", background: "var(--panel)" }}>
-                  <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text-2)" }}>倒數與整體進度</div>
-                  <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 4, fontWeight: 400 }}>
-                    點擊任一週標題可記錄撞期活動或重要死線
+                <th className="sticky-col" style={{ padding: "10px 12px", background: "var(--panel)" }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text-2)" }}>倒數週數 ／ 撞期雷達</div>
+                  <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 3, fontWeight: 400 }}>
+                    點擊週次記錄撞期活動或重要死線
                   </div>
                 </th>
                 {orderedWeeks.map((week) => {
@@ -497,32 +595,11 @@ export default function ScheduleView({
                     <th
                       key={week.id}
                       className={`week-head-cell ${week.phase === "event" ? "is-event-week" : ""} ${wp.hasConflict ? "has-conflict" : ""}`}
-                      onClick={() =>
-                        setEditingWeek({
-                          week,
-                          monthLabel: week.monthLabel,
-                          dateRange: week.dateRange,
-                          countdownLabel: week.countdownLabel,
-                          phase: week.phase,
-                          memo: week.memo,
-                          events: [...week.majorEvents],
-                          newEventTitle: "",
-                          newEventKind: "conflict",
-                        })
-                      }
+                      onClick={() => openWeekEditor(week, 1)}
                     >
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4 }}>
                         <span className="week-countdown">{week.countdownLabel}</span>
                         <span className="week-dates tabular">{week.dateRange}</span>
-                      </div>
-
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
-                        <div className="progress-track" style={{ height: 4, flex: 1 }}>
-                          <div className="progress-fill" style={{ width: `${wp.percent}%` }} />
-                        </div>
-                        <span className="tabular" style={{ fontSize: 11.5, fontFamily: "var(--font-mono)", color: "var(--text-2)" }}>
-                          {wp.percent}%
-                        </span>
                       </div>
 
                       {week.majorEvents.map((ev) => (
@@ -550,185 +627,106 @@ export default function ScheduleView({
             <tbody>
               {orderedTeams.map((team) => {
                 const tp = metrics.teamProgress[team.id] ?? { percent: 0, done: 0, total: 0, latestStage: "待排" };
-                const stageRuns: Array<{ stage: CellStage; weeks: CampaignWeek[] }> = [];
-                for (const w of orderedWeeks) {
-                  const st = cellMap.get(`${w.id}:${team.id}`)?.stage ?? "待排";
-                  const prev = stageRuns[stageRuns.length - 1];
-                  if (prev && prev.stage === st) {
-                    prev.weeks.push(w);
-                  } else {
-                    stageRuns.push({ stage: st, weeks: [w] });
-                  }
-                }
 
                 return (
-                  <Fragment key={team.id}>
-                    {/* Row A: Merged Continuous Horizontal Stage Ribbon (`colSpan`) */}
-                    <tr className="stage-ribbon-row">
-                      <td className="sticky-col team-row-header" rowSpan={2}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                          <span className={`team-dot team-dot-${team.color}`} />
-                          <strong style={{ fontSize: 13.5 }}>{team.name}</strong>
-                        </div>
-                        <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 4 }}>
-                          {team.lead ? `負責：${team.lead}` : "尚未指派組長"}
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
-                          <div className="progress-track" style={{ height: 5, flex: 1 }}>
-                            <div className="progress-fill" style={{ width: `${tp.percent}%` }} />
-                          </div>
-                          <span className="tabular" style={{ fontSize: 11.5, fontFamily: "var(--font-mono)", color: "var(--text-2)" }}>
-                            {tp.percent}%
-                          </span>
-                        </div>
-                        <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 3 }}>
-                          待辦 {tp.done}/{tp.total} 完成
-                        </div>
-                      </td>
+                  <tr key={team.id}>
+                    <td className="sticky-col team-row-header">
+                      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                        <span className={`team-dot team-dot-${team.color}`} />
+                        <strong style={{ fontSize: 13.5 }}>{team.name}</strong>
+                      </div>
+                      <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 4 }}>
+                        {team.lead ? `負責：${team.lead}` : "尚未指派組長"}
+                      </div>
+                      <div className="progress-track" style={{ height: 4, marginTop: 8 }}>
+                        <div className="progress-fill" style={{ width: `${tp.percent}%` }} />
+                      </div>
+                      <div className="tabular" style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 4 }}>
+                        組內待辦 {tp.done}/{tp.total} 完成
+                      </div>
+                    </td>
 
-                      {stageRuns.map((run) => {
-                        const firstWeek = run.weeks[0];
-                        const lastWeek = run.weeks[run.weeks.length - 1];
-                        const firstCell = cellMap.get(`${firstWeek.id}:${team.id}`);
-                        const isAllPost = run.weeks.every((w) => w.phase === "post");
-                        const startDay = firstWeek.dateRange.split(/[–~-]/)[0]?.trim() ?? firstWeek.dateRange;
-                        const endDay = lastWeek.dateRange.split(/[–~-]/).pop()?.trim() ?? lastWeek.dateRange;
-                        return (
-                          <td
-                            key={`ribbon-${team.id}-${firstWeek.id}`}
-                            colSpan={run.weeks.length}
-                            className={`stage-ribbon-cell ${isAllPost ? "is-post" : ""}`}
-                          >
-                            <div
-                              className={stageSpanClass(run.stage)}
-                              role="button"
-                              tabIndex={0}
-                              title="點擊調整此階段與連續週數"
-                              onClick={() =>
-                                setEditingCell({
-                                  week: firstWeek,
-                                  team,
-                                  stage: run.stage,
-                                  weeklyFocus: firstCell?.weeklyFocus ?? "",
-                                  crossTeam: firstCell?.crossTeam ?? "",
-                                  newTodo: "",
-                                  spanCount: run.weeks.length,
-                                })
-                              }
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter" || e.key === " ") {
-                                  e.preventDefault();
-                                  setEditingCell({
-                                    week: firstWeek,
-                                    team,
-                                    stage: run.stage,
-                                    weeklyFocus: firstCell?.weeklyFocus ?? "",
-                                    crossTeam: firstCell?.crossTeam ?? "",
-                                    newTodo: "",
-                                    spanCount: run.weeks.length,
-                                  });
-                                }
-                              }}
-                            >
-                              <span>{run.stage}</span>
-                              {run.weeks.length > 1 && (
-                                <span className="stage-span-meta">
-                                  連續 {run.weeks.length} 週 · {startDay}–{endDay}
-                                </span>
-                              )}
+                    {orderedWeeks.map((week, wIdx) => {
+                      const cell = cellMap.get(`${week.id}:${team.id}`);
+                      const prevWeek = wIdx > 0 ? orderedWeeks[wIdx - 1] : null;
+                      const prevCell = prevWeek ? cellMap.get(`${prevWeek.id}:${team.id}`) : undefined;
+
+                      const curFocus = (cell?.weeklyFocus ?? "").trim();
+                      const prevFocus = (prevCell?.weeklyFocus ?? "").trim();
+                      const showFocus = Boolean(curFocus) && curFocus !== prevFocus;
+
+                      const curCross = (cell?.crossTeam ?? "").trim();
+                      const prevCross = (prevCell?.crossTeam ?? "").trim();
+                      const showCross = Boolean(curCross) && curCross !== prevCross;
+
+                      const cellTodos = snapshot.todos.filter((td) => td.teamId === team.id && td.weekId === week.id);
+                      const isEmptyBody = !showFocus && !showCross && cellTodos.length === 0;
+
+                      return (
+                        <td
+                          key={`${week.id}:${team.id}`}
+                          className={`matrix-cell ${week.phase === "post" ? "is-post" : ""}`}
+                          onClick={() =>
+                            setEditingCell({
+                              week,
+                              team,
+                              weeklyFocus: cell?.weeklyFocus ?? "",
+                              crossTeam: cell?.crossTeam ?? "",
+                              newTodo: "",
+                            })
+                          }
+                        >
+                          {cellTodos.length > 0 && (
+                            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 2 }}>
+                              <span className="tabular" style={{ fontSize: 11, color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>
+                                待辦 {cellTodos.filter((t) => t.done).length}/{cellTodos.length}
+                              </span>
                             </div>
-                          </td>
-                        );
-                      })}
-                    </tr>
+                          )}
 
-                    {/* Row B: Per-Week Focus & Todos (Deduplicating Repeated Focus/CrossTeam) */}
-                    <tr>
-                      {orderedWeeks.map((week, wIdx) => {
-                        const cell = cellMap.get(`${week.id}:${team.id}`);
-                        const stage = cell?.stage ?? "待排";
-                        const prevWeek = wIdx > 0 ? orderedWeeks[wIdx - 1] : null;
-                        const prevCell = prevWeek ? cellMap.get(`${prevWeek.id}:${team.id}`) : undefined;
+                          {showFocus && (
+                            <div className="cell-focus" style={{ marginTop: 2 }}>
+                              {curFocus}
+                            </div>
+                          )}
 
-                        const curFocus = (cell?.weeklyFocus ?? "").trim();
-                        const prevFocus = (prevCell?.weeklyFocus ?? "").trim();
-                        const showFocus = Boolean(curFocus) && curFocus !== prevFocus;
+                          {cellTodos.length > 0 && (
+                            <ul className="cell-todo-list">
+                              {cellTodos.map((td) => (
+                                <li key={td.id} className={`cell-todo-item ${td.done ? "is-done" : ""}`}>
+                                  <button
+                                    type="button"
+                                    aria-label={`切換完成：${td.title}`}
+                                    onClick={(e) => toggleTodoInline(td.id, !td.done, e)}
+                                    style={{
+                                      border: "none",
+                                      background: "transparent",
+                                      padding: 0,
+                                      marginTop: 1,
+                                      cursor: "pointer",
+                                      color: td.done ? "var(--ok)" : "var(--text-3)",
+                                      flexShrink: 0,
+                                    }}
+                                  >
+                                    {td.done ? <CheckCircle2 size={13} /> : <Circle size={13} />}
+                                  </button>
+                                  <span>{td.title}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
 
-                        const curCross = (cell?.crossTeam ?? "").trim();
-                        const prevCross = (prevCell?.crossTeam ?? "").trim();
-                        const showCross = Boolean(curCross) && curCross !== prevCross;
+                          {showCross && <div className="cell-cross">跨部：{curCross}</div>}
 
-                        const cellTodos = snapshot.todos.filter((td) => td.teamId === team.id && td.weekId === week.id);
-                        const isEmptyBody = !showFocus && !showCross && cellTodos.length === 0;
-
-                        return (
-                          <td
-                            key={`${week.id}:${team.id}`}
-                            className={`matrix-cell ${week.phase === "post" ? "is-post" : ""}`}
-                            onClick={() =>
-                              setEditingCell({
-                                week,
-                                team,
-                                stage,
-                                weeklyFocus: cell?.weeklyFocus ?? "",
-                                crossTeam: cell?.crossTeam ?? "",
-                                newTodo: "",
-                                spanCount: 1,
-                              })
-                            }
-                          >
-                            {cellTodos.length > 0 && (
-                              <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 2 }}>
-                                <span className="tabular" style={{ fontSize: 11, color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>
-                                  待辦 {cellTodos.filter((t) => t.done).length}/{cellTodos.length}
-                                </span>
-                              </div>
-                            )}
-
-                            {showFocus && (
-                              <div className="cell-focus" style={{ marginTop: 2 }}>
-                                {curFocus}
-                              </div>
-                            )}
-
-                            {cellTodos.length > 0 && (
-                              <ul className="cell-todo-list">
-                                {cellTodos.map((td) => (
-                                  <li key={td.id} className={`cell-todo-item ${td.done ? "is-done" : ""}`}>
-                                    <button
-                                      type="button"
-                                      aria-label={`切換完成：${td.title}`}
-                                      onClick={(e) => toggleTodoInline(td.id, !td.done, e)}
-                                      style={{
-                                        border: "none",
-                                        background: "transparent",
-                                        padding: 0,
-                                        marginTop: 1,
-                                        cursor: "pointer",
-                                        color: td.done ? "var(--ok)" : "var(--text-3)",
-                                        flexShrink: 0,
-                                      }}
-                                    >
-                                      {td.done ? <CheckCircle2 size={13} /> : <Circle size={13} />}
-                                    </button>
-                                    <span>{td.title}</span>
-                                  </li>
-                                ))}
-                              </ul>
-                            )}
-
-                            {showCross && <div className="cell-cross">跨部：{curCross}</div>}
-
-                            {isEmptyBody && (
-                              <div style={{ fontSize: 12, color: "var(--text-4)", paddingTop: 2 }}>
-                                {curFocus ? "↳ 延續上週重點" : "＋ 點擊補充重點或待辦"}
-                              </div>
-                            )}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  </Fragment>
+                          {isEmptyBody && (
+                            <div style={{ fontSize: 12, color: "var(--text-4)", paddingTop: 2 }}>
+                              {curFocus ? "↳ 延續上週重點" : "＋ 點擊補充重點或待辦"}
+                            </div>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
                 );
               })}
             </tbody>
@@ -736,7 +734,7 @@ export default function ScheduleView({
         </div>
       </section>
 
-      {/* ── Dialog 1: Edit Cell (Stage, Multi-Week Span, Weekly Focus, Cross-Team, Quick Todo) ── */}
+      {/* ── Dialog 1: Edit Team Cell (Weekly Focus, Cross-Team, Quick Todo) ── */}
       <Dialog.Root open={Boolean(editingCell)} onOpenChange={(o) => !o && setEditingCell(null)}>
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
@@ -752,38 +750,6 @@ export default function ScheduleView({
                       <X size={15} />
                     </button>
                   </Dialog.Close>
-                </div>
-
-                <div>
-                  <label className="field-label">當週階段與完成度（連續相同階段會自動合併為一條橫幅）</label>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                    {CELL_STAGES.map((st) => (
-                      <button
-                        key={st}
-                        type="button"
-                        className={`btn btn-sm ${editingCell.stage === st ? "btn-primary" : ""}`}
-                        onClick={() => setEditingCell({ ...editingCell, stage: st })}
-                      >
-                        {st}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <label className="field-label">階段橫跨週數（從本週起算）</label>
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    {[1, 2, 3, 4].map((n) => (
-                      <button
-                        key={n}
-                        type="button"
-                        className={`btn btn-sm ${editingCell.spanCount === n ? "btn-primary" : ""}`}
-                        onClick={() => setEditingCell({ ...editingCell, spanCount: n })}
-                      >
-                        {n === 1 ? "僅本週" : `連續 ${n} 週`}
-                      </button>
-                    ))}
-                  </div>
                 </div>
 
                 <div>
@@ -839,13 +805,45 @@ export default function ScheduleView({
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <Dialog.Title style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>
-                    編輯週次與撞期警示 · {editingWeek.week.countdownLabel}
+                    整體專案進度與週次設定 · {editingWeek.week.countdownLabel}
                   </Dialog.Title>
                   <Dialog.Close asChild>
                     <button type="button" className="icon-btn" aria-label="關閉">
                       <X size={15} />
                     </button>
                   </Dialog.Close>
+                </div>
+
+                <div>
+                  <label className="field-label">本週整體專案完成進度／階段（全團隊共用頂部進度線，不重複顯示於各組）</label>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {CELL_STAGES.map((st) => (
+                      <button
+                        key={st}
+                        type="button"
+                        className={`btn btn-sm ${editingWeek.stage === st ? "btn-primary" : ""}`}
+                        onClick={() => setEditingWeek({ ...editingWeek, stage: st })}
+                      >
+                        {st}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="field-label">階段延續週數（連續相同進度會自動合併成一條橫條）</label>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {[1, 2, 3, 4].map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        className={`btn btn-sm ${editingWeek.spanCount === n ? "btn-primary" : ""}`}
+                        onClick={() => setEditingWeek({ ...editingWeek, spanCount: n })}
+                      >
+                        {n === 1 ? "僅本週" : `連續 ${n} 週`}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>

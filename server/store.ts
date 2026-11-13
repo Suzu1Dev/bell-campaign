@@ -45,7 +45,7 @@ import {
   type WeekEventItem,
 } from "../shared/types.js";
 import { curateComparableEvents } from "../shared/docs.js";
-import { parseCsvGrid, parseGoogleSheetCsv } from "../shared/sheets.js";
+import { defaultWeekStage, parseCsvGrid, parseGoogleSheetCsv } from "../shared/sheets.js";
 import { AppError } from "./errors.js";
 
 const DEFAULT_SETTINGS: ProviderSettings = {
@@ -127,6 +127,7 @@ export class CampaignStore {
         end_date TEXT NOT NULL DEFAULT '',
         countdown_label TEXT NOT NULL,
         phase TEXT NOT NULL DEFAULT 'prep',
+        stage TEXT NOT NULL DEFAULT '待排',
         major_events_json TEXT NOT NULL DEFAULT '[]',
         memo TEXT NOT NULL DEFAULT '',
         progress_override REAL
@@ -275,6 +276,7 @@ export class CampaignStore {
     `);
 
     this.ensureColumn("campaigns", "brief", "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn("weeks", "stage", "TEXT NOT NULL DEFAULT '待排'");
     this.ensureColumn("meetings", "doc_url", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("meetings", "doc_source", "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn("forms", "sheet_sync_url", "TEXT NOT NULL DEFAULT ''");
@@ -285,6 +287,26 @@ export class CampaignStore {
       this.seedInitialCampaign();
     } else {
       this.backfillNewModulesIfEmpty();
+    }
+    this.backfillWeekStagesIfNeeded();
+  }
+
+  private backfillWeekStagesIfNeeded(): void {
+    const cids = this.db.prepare("SELECT id FROM campaigns").all() as Array<{ id: string }>;
+    const updateStmt = this.db.prepare("UPDATE weeks SET stage = ? WHERE id = ?");
+    for (const { id: cid } of cids) {
+      const rows = this.db
+        .prepare("SELECT id, phase, stage FROM weeks WHERE campaign_id = ? ORDER BY order_index ASC")
+        .all(cid) as Array<{ id: string; phase: string; stage: string }>;
+      if (rows.length === 0 || rows.some((r) => r.stage && r.stage !== "待排")) continue;
+      const prepCount = rows.filter((r) => r.phase === "prep").length;
+      let prepIdx = 0;
+      for (const r of rows) {
+        const phase = (["prep", "event", "post"].includes(r.phase) ? r.phase : "prep") as "prep" | "event" | "post";
+        const stage = defaultWeekStage(phase, prepIdx, prepCount);
+        if (phase === "prep") prepIdx += 1;
+        updateStmt.run(stage, r.id);
+      }
     }
   }
 
@@ -477,10 +499,14 @@ export class CampaignStore {
     ];
 
     const insertWeek = this.db.prepare(
-      `INSERT INTO weeks (id, campaign_id, order_index, month_label, date_range, start_date, end_date, countdown_label, phase, major_events_json, memo, progress_override)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+      `INSERT INTO weeks (id, campaign_id, order_index, month_label, date_range, start_date, end_date, countdown_label, phase, stage, major_events_json, memo, progress_override)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
     );
+    const prepSeedCount = weeksSeed.filter((w) => w.phase === "prep").length;
+    let prepSeedIdx = 0;
     weeksSeed.forEach((w, i) => {
+      const stage = defaultWeekStage(w.phase, prepSeedIdx, prepSeedCount);
+      if (w.phase === "prep") prepSeedIdx += 1;
       insertWeek.run(
         w.id,
         campaignId,
@@ -491,6 +517,7 @@ export class CampaignStore {
         w.end,
         w.countdown,
         w.phase,
+        stage,
         JSON.stringify(w.events),
         w.memo,
       );
@@ -1297,6 +1324,7 @@ export class CampaignStore {
       endDate: String(w.end_date ?? ""),
       countdownLabel: String(w.countdown_label),
       phase: (["prep", "event", "post"].includes(String(w.phase)) ? w.phase : "prep") as "prep" | "event" | "post",
+      stage: ((CELL_STAGES as readonly string[]).includes(String(w.stage)) ? w.stage : "待排") as CellStage,
       majorEvents: safeJsonParse<WeekEventItem[]>(String(w.major_events_json ?? "[]"), []),
       memo: String(w.memo ?? ""),
       progressOverride: w.progress_override === null || w.progress_override === undefined ? null : Number(w.progress_override),
@@ -1543,8 +1571,8 @@ export class CampaignStore {
     const monthNames = ["一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月"];
     const totalWeeks = prepCount + 1 + postWeeks;
     const insertWeek = this.db.prepare(
-      `INSERT INTO weeks (id, campaign_id, order_index, month_label, date_range, start_date, end_date, countdown_label, phase, major_events_json, memo)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '')`,
+      `INSERT INTO weeks (id, campaign_id, order_index, month_label, date_range, start_date, end_date, countdown_label, phase, stage, major_events_json, memo)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '')`,
     );
 
     for (let i = 0; i < totalWeeks; i++) {
@@ -1568,6 +1596,7 @@ export class CampaignStore {
         we.toISOString().slice(0, 10),
         countdown,
         phase,
+        defaultWeekStage(phase, i, prepCount),
       );
     }
 
@@ -1662,19 +1691,21 @@ export class CampaignStore {
   // ── Weeks, Teams & Matrix Cells ──────────────────────────────────────────
   addWeek(
     campaignId: string,
-    input: { monthLabel: string; dateRange: string; countdownLabel: string; phase: "prep" | "event" | "post" },
+    input: { monthLabel: string; dateRange: string; countdownLabel: string; phase: "prep" | "event" | "post"; stage?: CellStage },
   ): CampaignWeek {
     const maxRow = this.db
       .prepare("SELECT COALESCE(MAX(order_index), -1) AS max_idx FROM weeks WHERE campaign_id = ?")
       .get(campaignId) as { max_idx: number };
     const id = `wk-${randomUUID().slice(0, 8)}`;
     const orderIndex = maxRow.max_idx + 1;
+    const stage: CellStage =
+      input.stage ?? (input.phase === "event" ? "活動" : input.phase === "post" ? "復盤" : "待排");
     this.db
       .prepare(
-        `INSERT INTO weeks (id, campaign_id, order_index, month_label, date_range, countdown_label, phase, major_events_json, memo)
-         VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '')`,
+        `INSERT INTO weeks (id, campaign_id, order_index, month_label, date_range, countdown_label, phase, stage, major_events_json, memo)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', '')`,
       )
-      .run(id, campaignId, orderIndex, input.monthLabel.trim(), input.dateRange.trim(), input.countdownLabel.trim(), input.phase);
+      .run(id, campaignId, orderIndex, input.monthLabel.trim(), input.dateRange.trim(), input.countdownLabel.trim(), input.phase, stage);
     return {
       id,
       campaignId,
@@ -1685,6 +1716,7 @@ export class CampaignStore {
       endDate: "",
       countdownLabel: input.countdownLabel.trim(),
       phase: input.phase,
+      stage,
       majorEvents: [],
       memo: "",
       progressOverride: null,
@@ -1698,6 +1730,7 @@ export class CampaignStore {
       dateRange?: string;
       countdownLabel?: string;
       phase?: "prep" | "event" | "post";
+      stage?: CellStage;
       majorEvents?: WeekEventItem[];
       memo?: string;
       progressOverride?: number | null;
@@ -1710,6 +1743,12 @@ export class CampaignStore {
     const dateRange = patch.dateRange !== undefined ? patch.dateRange.trim() : String(existing.date_range);
     const countdownLabel = patch.countdownLabel !== undefined ? patch.countdownLabel.trim() : String(existing.countdown_label);
     const phase = patch.phase !== undefined ? patch.phase : String(existing.phase);
+    const stage =
+      patch.stage !== undefined
+        ? patch.stage
+        : (CELL_STAGES as readonly string[]).includes(String(existing.stage))
+          ? String(existing.stage)
+          : "待排";
     const majorEvents =
       patch.majorEvents !== undefined
         ? JSON.stringify(patch.majorEvents)
@@ -1725,10 +1764,10 @@ export class CampaignStore {
     this.db
       .prepare(
         `UPDATE weeks
-         SET month_label = ?, date_range = ?, countdown_label = ?, phase = ?, major_events_json = ?, memo = ?, progress_override = ?
+         SET month_label = ?, date_range = ?, countdown_label = ?, phase = ?, stage = ?, major_events_json = ?, memo = ?, progress_override = ?
          WHERE id = ?`,
       )
-      .run(monthLabel, dateRange, countdownLabel, phase, majorEvents, memo, progressOverride, weekId);
+      .run(monthLabel, dateRange, countdownLabel, phase, stage, majorEvents, memo, progressOverride, weekId);
   }
 
   addTeam(
@@ -2523,8 +2562,8 @@ export class CampaignStore {
 
       const weekIds: string[] = [];
       const insertWeek = this.db.prepare(
-        `INSERT INTO weeks (id, campaign_id, order_index, month_label, date_range, countdown_label, phase, major_events_json, memo, progress_override)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO weeks (id, campaign_id, order_index, month_label, date_range, countdown_label, phase, stage, major_events_json, memo, progress_override)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       parsed.weeks.forEach((w, idx) => {
         const wId = `wk-${randomUUID().slice(0, 8)}`;
@@ -2537,6 +2576,7 @@ export class CampaignStore {
           w.dateRange,
           w.countdownLabel,
           w.phase,
+          w.stage,
           JSON.stringify(w.majorEvents),
           w.memo,
           w.progressOverride,
@@ -2588,7 +2628,9 @@ export class CampaignStore {
       pacing: PacingLevel;
       mainGoal?: string;
       monthlyGoals?: MonthlyGoal[];
-      preview: Pick<AutoSchedulePreview, "cells" | "todos">;
+      preview: Pick<AutoSchedulePreview, "cells" | "todos"> & {
+        weekStages?: Array<{ weekId: string; stage: CellStage }>;
+      };
     },
   ): CampaignSnapshot {
     const now = new Date().toISOString();
@@ -2599,6 +2641,20 @@ export class CampaignStore {
         ...(input.mainGoal !== undefined ? { mainGoal: input.mainGoal } : {}),
         ...(input.monthlyGoals !== undefined ? { monthlyGoals: input.monthlyGoals } : {}),
       });
+
+      const stageByWeek = new Map<string, CellStage>();
+      for (const cell of input.preview.cells) {
+        if (!stageByWeek.has(cell.weekId) && cell.stage !== "待排") {
+          stageByWeek.set(cell.weekId, cell.stage);
+        }
+      }
+      for (const ws of input.preview.weekStages ?? []) {
+        stageByWeek.set(ws.weekId, ws.stage);
+      }
+      const updateWeekStage = this.db.prepare("UPDATE weeks SET stage = ? WHERE id = ? AND campaign_id = ?");
+      for (const [weekId, stage] of stageByWeek) {
+        updateWeekStage.run(stage, weekId, campaignId);
+      }
 
       for (const cell of input.preview.cells) {
         const existing = this.db

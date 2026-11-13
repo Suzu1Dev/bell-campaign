@@ -113,6 +113,16 @@ test("End-to-end campaign workflows: todos, handbook generation, file upload, fo
     assert.equal(addTodoRes.status, 201);
     snap = (await addTodoRes.json()) as CampaignSnapshot;
     assert.equal(snap.todos.length, initialTodoCount + 1);
+    assert.equal(snap.weeks[0].stage, "進度25%");
+
+    const patchWeekRes = await fetch(`${baseUrl}/api/weeks/${snap.weeks[1].id}?campaignId=${cid}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ stage: "進度50%" }),
+    });
+    assert.equal(patchWeekRes.status, 200);
+    snap = (await patchWeekRes.json()) as CampaignSnapshot;
+    assert.equal(snap.weeks[1].stage, "進度50%");
 
     // 2. Generate a Speaker Handbook into the File Archive
     const genRes = await fetch(`${baseUrl}/api/campaigns/${cid}/files/generate-handbook`, {

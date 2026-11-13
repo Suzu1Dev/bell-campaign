@@ -98,7 +98,7 @@ export function TasksView({
                   <span className={`team-dot team-dot-${team.color}`} />
                   <strong style={{ fontSize: 14 }}>{team.name}</strong>
                 </div>
-                <span className="pill">{tp.latestStage}</span>
+                <span className="pill">{team.lead ? `組長：${team.lead}` : "籌備組"}</span>
               </div>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginTop: 4 }}>
                 <span className="kpi-value tabular">{tp.percent}%</span>

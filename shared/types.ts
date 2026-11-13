@@ -153,6 +153,7 @@ export interface CampaignWeek {
   endDate: string;
   countdownLabel: string;
   phase: "prep" | "event" | "post";
+  stage: CellStage;
   majorEvents: WeekEventItem[];
   memo: string;
   progressOverride: number | null;
@@ -359,6 +360,7 @@ export interface AutoSchedulePreview {
   pacing: PacingLevel;
   rationale: string;
   avoidedConflictWeeks: string[];
+  weekStages: Array<{ weekId: string; stage: CellStage }>;
   cells: ProposedCellChange[];
   todos: ProposedNewTodo[];
   weeklyLoadScores: Array<{ weekId: string; label: string; score: number; hasConflict: boolean }>;
