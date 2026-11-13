@@ -898,16 +898,19 @@ export function buildPacingSchedulePreview(
         for (const t of teams) {
           const tn = t.name.toLowerCase();
           if (
+            ((tn.includes("總召") || tn.includes("轉播") || tn.includes("營運")) &&
+              /直播|轉播|賽評|導播|主播|obs|仲裁|規章|no-llm|培訓|一籌|零籌/i.test(line)) ||
             ((tn.includes("出題") || tn.includes("競賽") || tn.includes("賽務")) &&
-              /出題|驗題|賽制|輪次|題目|解題|flag|livectf/i.test(line)) ||
-            ((tn.includes("infra") || tn.includes("技術") || tn.includes("平台") || tn.includes("架構")) &&
-              /infra|平台|靶機|容器|環境|伺服器|部署|計分|轉播/i.test(line)) ||
-            ((tn.includes("社團") || tn.includes("各校") || tn.includes("資格")) &&
-              /各校|社團|資格|領獎|新手|社員|審核/.test(line)) ||
-            ((tn.includes("行政") || tn.includes("廠商") || tn.includes("公關") || tn.includes("贊助")) &&
-              /行政|廠商|贊助|洽談|報名|預算|核銷/.test(line)) ||
-            ((tn.includes("行銷") || tn.includes("宣傳") || tn.includes("設計")) &&
-              /社群|貼文|宣傳|視覺|設計|曝光/.test(line)) ||
+              /出題|驗題|賽制|輪次|題目|解題|flag|livectf|writeup/i.test(line)) ||
+            ((tn.includes("網管") || tn.includes("infra") || tn.includes("技術") || tn.includes("平台") || tn.includes("架構")) &&
+              /網管|ctfd|vpn|流量|pcap|infra|平台|靶機|容器|環境|伺服器|部署|計分|instancer/i.test(line)) ||
+            (tn.includes("財務") && /財務|金流|結餘|預算|核銷|統編|發票|收據|勞務報酬|報帳/.test(line)) ||
+            (tn.includes("贊助") && /贊助|廠商|洽談|企劃書|hitcon|合作夥伴|履約/i.test(line)) ||
+            ((tn.includes("社團") || tn.includes("各校") || tn.includes("資格") || tn.includes("行政")) &&
+              /行政|各校|社團|資格|領獎|新手|社員|審核|報名|招工|邀請制|獎狀|證明/.test(line)) ||
+            (tn.includes("設計") && /主視覺|出圖|周邊|設計|版型|overlay|證書|送印/i.test(line)) ||
+            ((tn.includes("宣傳") || tn.includes("行銷")) &&
+              /社群|發文|貼文|宣傳|曝光|ctftime|discord|轉發/i.test(line)) ||
             (tn.includes("場務") && /場地|報到|器材|動線|便當|志工/.test(line)) ||
             ((tn.includes("講者") || tn.includes("panel") || tn.includes("咖啡") || tn.includes("議程")) &&
               /講者|信件|題綱|主持|簡報|名單|議程/.test(line))

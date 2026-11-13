@@ -93,12 +93,18 @@ export function TasksView({
               }}
               onClick={() => setTeamFilter(active ? "all" : team.id)}
             >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
                   <span className={`team-dot team-dot-${team.color}`} />
-                  <strong style={{ fontSize: 14 }}>{team.name}</strong>
+                  <strong style={{ fontSize: 14, whiteSpace: "nowrap" }}>{team.name}</strong>
                 </div>
-                <span className="pill">{team.lead ? `組長：${team.lead}` : "籌備組"}</span>
+                <span
+                  className="pill"
+                  title={team.lead || "籌備組"}
+                  style={{ maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis" }}
+                >
+                  {team.lead ? `組長：${team.lead}` : "籌備組"}
+                </span>
               </div>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginTop: 4 }}>
                 <span className="kpi-value tabular">{tp.percent}%</span>
@@ -126,7 +132,7 @@ export function TasksView({
           />
           <select
             className="select"
-            style={{ width: 148 }}
+            style={{ width: 176 }}
             value={newTeamId || snapshot.teams[0]?.id || ""}
             onChange={(e) => setNewTeamId(e.target.value)}
           >

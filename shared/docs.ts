@@ -275,6 +275,24 @@ const BENCHMARK_LIBRARY: readonly BenchmarkTemplate[] = [
     ],
   },
   {
+    title: "LakeCTF（EPFL 瑞士洛桑聯邦理工 · no-llm 政策）",
+    region: "國際",
+    category: "反 AI 自動解題與晉級制國際資安賽",
+    keywords: /ctf|llm|agent|出題|網管|資安|淘汰|八強|十六強|直播|lakectf/i,
+    baseScore: 88,
+    defaultWhy: "率先針對 LLM／AI Agent 自動解題制定公開規範（no-llm policy），並採緊湊晉級制取代過於冗長的循環賽，與今年零籌討論方向高度契合。",
+    timelinePattern: "開案定調 AI 使用邊界與晉級輪次 → 出題期實測主流 Agent 是否能一鍵秒解 → 賽前公告公平競賽條款與流量錄製聲明。",
+    specialIdeas: [
+      "與其單靠道德勸說禁用 LLM，不如在出題期加入「多步狀態互動、環境探索或即時對戰應變」設計，並由出題組先拿主流 Agent 實測過濾秒殺題",
+      "改採「初賽積分篩選 ＋ 16 強／8 強單敗或雙敗淘汰三天直播」，徹底解決零籌提到循環賽過於冗長、觀眾與選手疲乏的問題",
+      "為每隊注入專屬 Dynamic Flag 並搭配網管組 PCAP 流量留存，一旦抓到跨隊抄 Flag 或異常自動化掃描即可有憑有據仲裁",
+    ],
+    pitfalls: [
+      "若規章寫「禁用 AI」卻無技術驗證或題型區隔，守規矩的新手反而吃虧——建議明確界定「允許查語法／禁止全自動 Agent 掃描靶機」並搭配 Rate Limit",
+      "網管組錄製全場 VPN PCAP 流量時，若未設定 Ring Buffer 自動輪替與硬碟配額，極易在第二天塞爆磁碟導致 CTFd 與靶機全面當機",
+    ],
+  },
+  {
     title: "AIS3 EOF × 台灣跨校資安社聯合新手賽",
     region: "國內",
     category: "跨校資安社群與雙軌資格賽",
