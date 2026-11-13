@@ -651,8 +651,8 @@ export function buildStandaloneShareHtml(snapshot: CampaignSnapshot): string {
   table { border-collapse: collapse; width: 100%; min-width: 920px; font-size: 13px; }
   th, td { border-bottom: 1px solid rgba(15,17,21,.08); border-right: 1px solid rgba(15,17,21,.08); padding: 10px 12px; vertical-align: top; text-align: left; }
   th { background: #F2F3F6; min-width: 165px; }
-  .stage-head { background: #FFFFFF; padding: 8px 10px; }
-  .stage-pill { background: #F9ECF1; color: #9E2B5C; border: 1px solid rgba(158,43,92,.26); border-radius: 6px; padding: 5px 10px; font-weight: 600; font-size: 12px; }
+  .stage-head { background: #FFFFFF; padding: 4px 8px; vertical-align: middle; }
+  .stage-pill { background: #F9ECF1; color: #9E2B5C; border: 1px solid rgba(158,43,92,.26); border-radius: 999px; padding: 3px 10px; font-weight: 600; font-size: 11.5px; line-height: 1.3; }
   .team-col { position: sticky; left: 0; background: #FFFFFF; min-width: 150px; z-index: 1; }
   .team-col span { display: block; color: #636872; font-size: 12px; margin-top: 4px; }
   .month { font-size: 12px; color: #636872; font-weight: 500; }

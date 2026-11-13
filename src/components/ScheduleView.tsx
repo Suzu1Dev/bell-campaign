@@ -524,20 +524,18 @@ export default function ScheduleView({
                 ))}
               </tr>
 
-              {/* Row 2: Unified Project Completion Progress Ribbon across the Top */}
+              {/* Row 2: Slim Architectural Project Progress Track across the Top */}
               <tr className="project-progress-row">
-                <th className="sticky-col project-progress-sticky">
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4 }}>
-                    <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)", whiteSpace: "nowrap" }}>整體進度</span>
-                    <span className="pill pill-campaign tabular" style={{ height: 20, padding: "0 7px", fontSize: 11.5 }}>
-                      {metrics.overallPercent}%
-                    </span>
+                <th
+                  className="sticky-col project-progress-sticky"
+                  title={`已完成 ${metrics.completedTodos}/${metrics.totalTodos} 項待辦 · 點擊右側任一階段可調整`}
+                >
+                  <div className="project-progress-sticky-inner">
+                    <span className="project-progress-label">整體進度</span>
+                    <span className="project-progress-pct tabular">{metrics.overallPercent}%</span>
                   </div>
-                  <div className="progress-track" style={{ height: 5, marginTop: 6 }}>
-                    <div className="progress-fill" style={{ width: `${metrics.overallPercent}%` }} />
-                  </div>
-                  <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 4, fontWeight: 400 }}>
-                    總完成 {metrics.completedTodos}/{metrics.totalTodos} 待辦
+                  <div className="project-progress-edge-bar" aria-hidden="true">
+                    <span style={{ width: `${metrics.overallPercent}%` }} />
                   </div>
                 </th>
 
@@ -547,6 +545,7 @@ export default function ScheduleView({
                   const startDay = firstWeek.dateRange.split(/[–~-]/)[0]?.trim() ?? firstWeek.dateRange;
                   const endDay = lastWeek.dateRange.split(/[–~-]/).pop()?.trim() ?? lastWeek.dateRange;
                   const stagePct = stageToPercent(run.stage);
+                  const showMeter = run.weeks.length === 1 && run.stage.startsWith("進度");
                   const isFirst = rIdx === 0;
                   const isLast = rIdx === projectStageRuns.length - 1;
                   return (
@@ -558,23 +557,22 @@ export default function ScheduleView({
                       <button
                         type="button"
                         className={stageSpanClass(run.stage)}
-                        title="點擊調整此週期的整體專案完成進度階段"
+                        title="點擊調整此週期的整體專案完成進度階段與延續週數"
                         onClick={() => openWeekEditor(firstWeek, run.weeks.length)}
                       >
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, width: "100%" }}>
-                          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                            <span className="stage-node-dot" />
-                            <span>{run.stage}</span>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                          <span className="stage-node-dot" />
+                          <span>{run.stage}</span>
+                        </span>
+                        {run.weeks.length > 1 ? (
+                          <span className="stage-span-meta">
+                            連續 {run.weeks.length} 週 · {startDay}–{endDay}
                           </span>
-                          {run.weeks.length > 1 && (
-                            <span className="stage-span-meta">
-                              連續 {run.weeks.length} 週 · {startDay}–{endDay}
-                            </span>
-                          )}
-                        </div>
-                        <div className="stage-inline-track" aria-hidden="true">
-                          <div className="stage-inline-fill" style={{ width: `${stagePct}%` }} />
-                        </div>
+                        ) : showMeter ? (
+                          <span className="stage-inline-meter" aria-hidden="true">
+                            <span style={{ width: `${stagePct}%` }} />
+                          </span>
+                        ) : null}
                       </button>
                     </th>
                   );
