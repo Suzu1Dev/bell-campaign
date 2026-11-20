@@ -903,11 +903,7 @@ ${JSON.stringify({
   }
 
   // 0. New Project Positioning / Brief Onboarding & Similar-Event Inspiration Curation
-  const isNewProjectBlank = !snapshot.campaign.brief.trim() && snapshot.todos.length === 0;
-  if (
-    /想辦|打算辦|專案主要|活動性質|定位|受眾|規模|黑客松|工作坊|市集|展覽|音樂節|論壇|研討會|靈感|借鏡|相似活動/.test(msg) ||
-    (isNewProjectBlank && msg.length >= 10 && !/緊湊|手冊|招工|會議|刪除|移除|清空|取消/.test(msg))
-  ) {
+  const pushSetupProjectBrief = () => {
     const cleanBrief = msg.replace(/^(我們|我)?(想辦|打算辦|規劃|專案主要是)[:：\s]*/, "").trim();
     proposals.push({
       id: `prop-${randomUUID().slice(0, 8)}`,
@@ -925,6 +921,13 @@ ${JSON.stringify({
         ? `太好了！我已根據你的描述整理並寫入專案性質定位：「**${cleanBrief.slice(0, 60)}**」，同步更新專案核心目標與「**靈感借鏡**」相似活動分析。`
         : `太好了！我已根據你的描述整理出專案性質定位：「**${cleanBrief.slice(0, 60)}**」。\n點擊下方按鈕套用後，系統會同步寫入專案核心目標，並在「**靈感借鏡**」頁面為你匹配國內外相似活動的**時程巧思、亮點企劃與前人避坑提醒**！`,
     );
+  };
+  const isNewProjectBlank = !snapshot.campaign.brief.trim() && snapshot.todos.length === 0;
+  if (
+    !/刪除|移除|清空|取消/.test(msg) &&
+    /想辦|打算辦|專案主要|活動性質|定位|受眾|規模|黑客松|工作坊|市集|展覽|音樂節|論壇|研討會|靈感|借鏡|相似活動/.test(msg)
+  ) {
+    pushSetupProjectBrief();
   }
 
   // 0b. Partner / Speaker / Vendor / Temp Staff quick add
@@ -1188,6 +1191,18 @@ ${JSON.stringify({
           : `已準備在 **${targetWeek.countdownLabel}（${targetWeek.dateRange}）** 加入提醒標記，後續自動排程將自動避開撞期時段。`,
       );
     }
+  }
+
+  // 8. Fallback: Blank-campaign brief onboarding only when no specific intent matched
+  if (
+    isNewProjectBlank &&
+    msg.length >= 10 &&
+    proposals.length === 0 &&
+    replyLines.length === 0 &&
+    !isCompoundAudit &&
+    !/緊湊|手冊|招工|會議|刪除|移除|清空|取消/.test(msg)
+  ) {
+    pushSetupProjectBrief();
   }
 
   // Default comprehensive status overview if purely conversational / status check

@@ -297,6 +297,12 @@ test("renderSingleSlideHtml matrix wraps .dk-mx-team inside <td> and Markdown pa
   assert.equal(isSafeMarkdownUrl("//evil.com/phish"), false);
   assert.equal(isSafeMarkdownUrl("///evil.com"), false);
   assert.equal(isSafeMarkdownUrl("/\\evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("/\t/evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("/\r/evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("/\t\\evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("/\u0000/evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("/\u000b/evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("/\u007f/evil.com/phish"), false);
   assert.equal(isSafeMarkdownUrl("javascript:alert(1)"), false);
   assert.equal(isSafeMarkdownUrl("data:text/html,<script>alert(1)</script>"), false);
 
@@ -306,7 +312,7 @@ test("renderSingleSlideHtml matrix wraps .dk-mx-team inside <td> and Markdown pa
 ---
 
 - [x] 已完成 \`場勘\`
-- [ ] 待確認 [官方網站](https://example.com) 與 [危險連結](javascript:alert(1))
+- [ ] 待確認 [官方網站](https://example.com)、[危險連結](javascript:alert(1)) 與 [控制字元](/\t/evil.com/phish)
 
 | 組別 | 窗口 |
 | :--- | ---: |
@@ -327,7 +333,9 @@ echo "hello"
     const spans = blocks[3].items[1]?.spans ?? [];
     assert.ok(spans.some((s) => s.type === "link" && s.href === "https://example.com"));
     assert.ok(!spans.some((s) => s.type === "link" && s.href.startsWith("javascript:")));
+    assert.ok(!spans.some((s) => s.type === "link" && s.label === "控制字元"));
     assert.ok(spans.some((s) => s.type === "text" && s.text === "危險連結"));
+    assert.ok(spans.some((s) => s.type === "text" && s.text === "控制字元"));
   }
   assert.equal(blocks[4]?.type, "table");
   assert.equal(blocks[5]?.type, "code");

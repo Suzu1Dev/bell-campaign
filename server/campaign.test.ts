@@ -909,3 +909,68 @@ test("External AI split_team escapes invalid regex moveKeyword and avoids blind 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Blank campaign Bot commands do not hijack intent or overwrite brief", async () => {
+  await withServer(async (baseUrl, store) => {
+    const createBlank = async (name: string) => {
+      const res = await fetch(`${baseUrl}/api/campaigns`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, eventDate: "2026-10-18" }),
+      });
+      assert.equal(res.status, 201);
+      const snap = (await res.json()) as CampaignSnapshot;
+      assert.equal(snap.campaign.brief, "");
+      assert.equal(snap.todos.length, 0);
+      return snap;
+    };
+
+    const postBot = async (cid: string, message: string) => {
+      const res = await fetch(`${baseUrl}/api/campaigns/${cid}/bot/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message }),
+      });
+      assert.equal(res.status, 200);
+      const snap = (await res.json()) as CampaignSnapshot;
+      const lastBot = [...snap.botMessages].reverse().find((m) => m.role === "assistant");
+      return { snap, proposals: lastBot?.proposals ?? [] };
+    };
+
+    // a. QUICK_PROMPTS[0] on blank campaign -> 0 proposals, brief stays ""
+    const campA = await createBlank("空白專案A");
+    const rQuick0 = await postBot(
+      campA.campaign.id,
+      "幫我檢視目前有沒有複合組別可以拆開獨立運作，或直接幫我新增組別並把相關待辦移轉過去。",
+    );
+    assert.equal(rQuick0.proposals.length, 0);
+    assert.equal(rQuick0.snap.campaign.brief, "");
+
+    // b. Deletion prompt containing event-type noun ("工作坊") -> 0 proposals, brief stays ""
+    const rDeleteWorkshop = await postBot(campA.campaign.id, "幫我刪除工作坊組別與所有待辦");
+    assert.equal(rDeleteWorkshop.proposals.length, 0);
+    assert.equal(rDeleteWorkshop.snap.campaign.brief, "");
+
+    // c. Add todo on blank campaign -> creates todo (add_todo), brief stays ""
+    const rAddTodo = await postBot(campA.campaign.id, "幫我新增待辦：確認場地租借");
+    assert.deepEqual(
+      rAddTodo.proposals.map((p) => p.kind),
+      ["add_todo"],
+    );
+    assert.equal(rAddTodo.snap.todos.length, 1);
+    assert.ok(rAddTodo.snap.todos[0]?.title.includes("確認場地租借"));
+    assert.equal(rAddTodo.snap.campaign.brief, "");
+
+    // d. Explicit team split on blank campaign with todos: [] -> only split_team, brief stays ""
+    const campB = await createBlank("空白專案B");
+    store.addTeam(campB.campaign.id, { name: "總召&轉播組", lead: "lead", targetHeadcount: 4 });
+    const rSplit = await postBot(campB.campaign.id, "把轉播組從總召&轉播組獨立出來");
+    assert.deepEqual(
+      rSplit.proposals.map((p) => p.kind),
+      ["split_team"],
+    );
+    assert.equal(rSplit.snap.campaign.brief, "");
+    assert.ok(rSplit.snap.teams.some((t) => t.name === "轉播組"));
+    assert.ok(rSplit.snap.teams.some((t) => t.name === "總召組"));
+  });
+});

@@ -18,7 +18,7 @@ const SAFE_URL_RE = /^(?:https?:\/\/|\/(?![\/\\])|#)/i;
 
 export function isSafeMarkdownUrl(raw: string): boolean {
   const trimmed = raw.trim();
-  if (!trimmed) return false;
+  if (!trimmed || /[\u0000-\u001f\u007f]/.test(trimmed)) return false;
   return SAFE_URL_RE.test(trimmed);
 }
 
