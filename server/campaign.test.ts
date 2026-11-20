@@ -4,10 +4,18 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
+import { inflateRawSync } from "node:zlib";
 import { CampaignStore } from "./store.js";
 import { createApp } from "./app.js";
-import type { CampaignSnapshot } from "../shared/types.js";
+import { applyPonytailPrompt, replyCampaignBot } from "./ai.js";
+import type { CampaignSnapshot, ProviderSettings } from "../shared/types.js";
 import type { SuiteManifest, SuiteTodayFeed } from "../shared/suite.js";
+import {
+  buildSlidesDeckModel,
+  buildStyledSheetClipboardHtml,
+  buildStyledSheetModel,
+} from "../shared/exporters.js";
+import { buildCampaignXlsxBuffer } from "./xlsx.js";
 
 async function withServer(
   fn: (baseUrl: string, store: CampaignStore) => Promise<void>,
@@ -379,5 +387,323 @@ test("Long-term multi-month timeline (>6 weeks), tentative dates, and non-destru
     const preservedTodo = snap.todos.find((t) => t.title.includes("第一批題目容器封裝"));
     assert.ok(preservedTodo);
     assert.ok(preservedTodo.weekId && snap.weeks.some((w) => w.id === preservedTodo.weekId));
+
+    // Rename campaign (e.g., TSCCTF-2026 -> TSCCTF-2027) with cascadeRename
+    const renameRes = await fetch(`${baseUrl}/api/campaigns/${cid}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "TSCCTF-2027",
+        cascadeRename: true,
+      }),
+    });
+    assert.equal(renameRes.status, 200);
+    snap = (await renameRes.json()) as CampaignSnapshot;
+    assert.equal(snap.campaign.name, "TSCCTF-2027");
+    assert.ok(snap.forms[0]?.title.includes("TSCCTF-2027"));
+    assert.ok(snap.inspirations.every((ins) => !ins.whySimilar.includes("TSCCTF-2026")));
+  });
+});
+
+test("Formatted .xlsx workbook export, rich HTML clipboard table, and multi-slide presentation deck export", async () => {
+  await withServer(async (baseUrl, store) => {
+    const snap = store.getSnapshot();
+    const cid = snap.campaign.id;
+
+    // 1. Rich clipboard HTML includes colors, merges, and non-clipping wrap
+    const clipHtml = buildStyledSheetClipboardHtml(snap);
+    assert.match(clipHtml, /colspan="/);
+    assert.match(clipHtml, /rowspan="/);
+    assert.match(clipHtml, /background-color:#434343/);
+    assert.match(clipHtml, /background-color:#FFF2CC/);
+    assert.match(clipHtml, /solid #000000/);
+    assert.match(clipHtml, /font-weight:700/);
+    assert.match(clipHtml, /white-space:pre-wrap/);
+
+    // 2. Native .xlsx export produces valid ZIP + OpenXML with custom column widths, wrapText, frozen panes, and mergeCells
+    const xlsxRes = await fetch(`${baseUrl}/api/campaigns/${cid}/export.xlsx`);
+    assert.equal(xlsxRes.status, 200);
+    assert.match(xlsxRes.headers.get("content-type") ?? "", /spreadsheetml\.sheet/);
+    const buf = Buffer.from(await xlsxRes.arrayBuffer());
+    assert.equal(buf.readUInt32LE(0), 0x04034b50); // ZIP PK\x03\x04 signature
+
+    // Walk local ZIP entries and verify xl/worksheets/sheet1.xml & xl/styles.xml decompress cleanly
+    const entries = new Map<string, string>();
+    let offset = 0;
+    while (offset + 30 <= buf.length && buf.readUInt32LE(offset) === 0x04034b50) {
+      const compSize = buf.readUInt32LE(offset + 18);
+      const nameLen = buf.readUInt16LE(offset + 26);
+      const extraLen = buf.readUInt16LE(offset + 28);
+      const name = buf.subarray(offset + 30, offset + 30 + nameLen).toString("utf8");
+      const dataStart = offset + 30 + nameLen + extraLen;
+      const inflated = inflateRawSync(buf.subarray(dataStart, dataStart + compSize)).toString("utf8");
+      entries.set(name, inflated);
+      offset = dataStart + compSize;
+    }
+    assert.ok(entries.has("xl/worksheets/sheet1.xml"));
+    assert.ok(entries.has("xl/styles.xml"));
+    const sheetXml = entries.get("xl/worksheets/sheet1.xml")!;
+    const stylesXml = entries.get("xl/styles.xml")!;
+    assert.match(sheetXml, /<pane xSplit="2" ySplit="4"/);
+    assert.match(sheetXml, /<mergeCell ref="A1:A2"\/>/);
+    assert.match(sheetXml, /customWidth="1"/);
+    assert.match(stylesXml, /wrapText="1"/);
+    assert.match(stylesXml, /FF434343/);
+    assert.match(stylesXml, /FF000000/);
+    assert.match(stylesXml, /<b\/>/);
+
+    // 3. Multi-slide Editorial Presentation Deck
+    const slides = buildSlidesDeckModel(snap);
+    assert.ok(slides.length >= 5);
+    assert.equal(slides[0].kind, "cover");
+    assert.equal(slides[1].kind, "roadmap");
+    assert.equal(slides[2].kind, "radar");
+    assert.equal(slides.at(-1)?.kind, "matrix");
+
+    const deckRes = await fetch(`${baseUrl}/api/campaigns/${cid}/export-deck.html?theme=dark`);
+    assert.equal(deckRes.status, 200);
+    const deckHtml = await deckRes.text();
+    assert.match(deckHtml, /data-deck-theme="dark"/);
+    assert.match(deckHtml, /@page \{ size: 1280px 720px; margin: 0; \}/);
+    assert.ok(deckHtml.includes(snap.campaign.name));
+  });
+});
+
+test("Ponytail efficiency mode defaults to ultra, persists via PATCH /api/settings, and shapes prompts & Bot replies", async () => {
+  await withServer(async (baseUrl, store) => {
+    // 1. Default snapshot settings use ponytailMode === "ultra"
+    const snapRes = await fetch(`${baseUrl}/api/snapshot`);
+    assert.equal(snapRes.status, 200);
+    const snap = (await snapRes.json()) as CampaignSnapshot;
+    assert.equal(snap.settings.ponytailMode, "ultra");
+
+    // 2. Prompt injection across modes
+    assert.equal(applyPonytailPrompt("BASE_PROMPT", "off"), "BASE_PROMPT");
+    assert.match(applyPonytailPrompt("BASE_PROMPT", "lite"), /Ponytail lite/);
+    assert.match(applyPonytailPrompt("BASE_PROMPT", "full"), /Ponytail full/);
+    assert.match(applyPonytailPrompt("BASE_PROMPT", "ultra"), /Ponytail ultra[\s\S]*先質疑冗餘/);
+
+    // 3. Builtin Campaign Bot includes Ponytail Ultra review note by default
+    const ultraReply = await replyCampaignBot(
+      snap,
+      "目前整體狀況如何？",
+      snap.settings,
+      new AbortController().signal,
+    );
+    assert.match(ultraReply.content, /Ponytail Ultra 精簡檢視/);
+    assert.doesNotMatch(ultraReply.content, /你可以直接對我說/);
+
+    // 4. External LLM runner receives injected Ponytail ultra rule + thinkingEffort calibration
+    let capturedPrompt = "";
+    await replyCampaignBot(
+      snap,
+      "幫我規劃下週議程",
+      { provider: "codex", model: "", ponytailMode: "ultra", thinkingEffort: "xhigh", botAutoApply: true },
+      new AbortController().signal,
+      async (prompt) => {
+        capturedPrompt = prompt;
+        return { content: "已精簡議程", proposals: [] };
+      },
+    );
+    assert.match(capturedPrompt, /Ponytail ultra/);
+    assert.match(capturedPrompt, /思考深度（xhigh/);
+
+    // 5. PATCH /api/settings persists ponytailMode, thinkingEffort, and botAutoApply
+    assert.equal(snap.settings.thinkingEffort, "medium");
+    assert.equal(snap.settings.botAutoApply, true);
+    const patchRes = await fetch(`${baseUrl}/api/settings`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ponytailMode: "full", thinkingEffort: "high" }),
+    });
+    assert.equal(patchRes.status, 200);
+    const updated = (await patchRes.json()) as ProviderSettings;
+    assert.equal(updated.ponytailMode, "full");
+    assert.equal(updated.thinkingEffort, "high");
+    assert.equal(store.getSettings().thinkingEffort, "high");
+
+    // 6. Proactive Campaign Bot splits compound team & migrates tasks immediately upon user request
+    const cid = snap.campaign.id;
+    const compoundTeam = store.addTeam(cid, { name: "總召&轉播組", lead: "owl_d", targetHeadcount: 5 });
+    const broadcastTodo = store.addTodo(cid, {
+      teamId: compoundTeam.id,
+      weekId: snap.weeks[0].id,
+      title: "OBS 導播彩排 & 排裁判值班表",
+      priority: "high",
+    });
+    const generalTodo = store.addTodo(cid, {
+      teamId: compoundTeam.id,
+      weekId: snap.weeks[0].id,
+      title: "五校社團時間對齊",
+      priority: "normal",
+    });
+
+    const splitChatRes = await fetch(`${baseUrl}/api/campaigns/${cid}/bot/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "轉播組我覺得可以獨立一組" }),
+    });
+    assert.equal(splitChatRes.status, 200);
+    const afterSplit = (await splitChatRes.json()) as CampaignSnapshot;
+    const lastBot = afterSplit.botMessages.at(-1)!;
+    assert.equal(lastBot.proposals[0]?.kind, "split_team");
+    assert.equal(lastBot.proposals[0]?.applied, true);
+
+    const renamedLeadTeam = afterSplit.teams.find((t) => t.id === compoundTeam.id);
+    const newBroadcastTeam = afterSplit.teams.find((t) => t.name === "轉播組");
+    assert.equal(renamedLeadTeam?.name, "總召組");
+    assert.ok(newBroadcastTeam);
+    assert.equal(newBroadcastTeam.orderIndex, renamedLeadTeam!.orderIndex + 1);
+    assert.equal(afterSplit.todos.find((t) => t.id === broadcastTodo.id)?.teamId, newBroadcastTeam.id);
+    assert.equal(afterSplit.todos.find((t) => t.id === generalTodo.id)?.teamId, compoundTeam.id);
+
+    // 7. Spreadsheet model includes all teams without truncating after 3 teams
+    for (const extra of ["贊助組", "財務組", "設計組"]) {
+      store.addTeam(cid, { name: extra, targetHeadcount: 3 });
+    }
+    const fullSnap = store.getSnapshot(cid);
+    assert.ok(fullSnap.teams.length >= 8);
+    const sheetModel = buildStyledSheetModel(fullSnap);
+    const colAValues = sheetModel.cells.map((r) => r[0]?.value).filter(Boolean);
+    for (const tm of fullSnap.teams) {
+      assert.ok(colAValues.some((v) => v.includes(tm.name)), `Expected team ${tm.name} in styled sheet model`);
+    }
+  });
+});
+
+test("Inline PDF headers, MIME inference on .md upload, Bot QUICK_PROMPTS[0], split_team regex safety, and xlsx edge cases", async () => {
+  await withServer(async (baseUrl, store) => {
+    const snap = store.getSnapshot();
+    const cid = snap.campaign.id;
+
+    // 1. Upload PDF and verify ?inline=1 vs ?download=1 vs SVG sandbox headers
+    const pdfBase64 = Buffer.from("%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n").toString("base64");
+    const pdfUp = await fetch(`${baseUrl}/api/campaigns/${cid}/files/upload`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "廠商電力配置圖",
+        category: "vendor",
+        fileName: "power-plan.pdf",
+        mimeType: "application/octet-stream",
+        dataBase64: pdfBase64,
+      }),
+    });
+    assert.equal(pdfUp.status, 201);
+    const snapAfterPdf = (await pdfUp.json()) as CampaignSnapshot;
+    const pdfFile = snapAfterPdf.files.find((f) => f.title === "廠商電力配置圖");
+    assert.ok(pdfFile);
+    assert.equal(pdfFile.mimeType, "application/pdf");
+
+    const inlineRes = await fetch(`${baseUrl}/api/files/${pdfFile.id}/raw?inline=1`);
+    assert.equal(inlineRes.status, 200);
+    assert.equal(inlineRes.headers.get("content-type"), "application/pdf");
+    assert.equal(inlineRes.headers.get("x-frame-options"), "SAMEORIGIN");
+    assert.match(inlineRes.headers.get("content-disposition") ?? "", /^inline;/);
+    const inlineCsp = inlineRes.headers.get("content-security-policy") ?? "";
+    assert.match(inlineCsp, /frame-ancestors 'self'/);
+    assert.doesNotMatch(inlineCsp, /sandbox/);
+
+    const dlRes = await fetch(`${baseUrl}/api/files/${pdfFile.id}/raw?download=1`);
+    assert.equal(dlRes.status, 200);
+    assert.match(dlRes.headers.get("content-disposition") ?? "", /^attachment;/);
+    assert.match(dlRes.headers.get("content-security-policy") ?? "", /sandbox/);
+
+    // 2. Upload .md with application/octet-stream -> inferred text/markdown + populated contentMd
+    const mdContent = "# 志工簽到說明\n\n- [x] 測試項目\n- [ ] 尚未完成";
+    const mdUp = await fetch(`${baseUrl}/api/campaigns/${cid}/files/upload`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "志工簽到 Markdown",
+        category: "handbook",
+        fileName: "checkin.md",
+        mimeType: "application/octet-stream",
+        dataBase64: Buffer.from(mdContent, "utf8").toString("base64"),
+      }),
+    });
+    assert.equal(mdUp.status, 201);
+    const snapAfterMd = (await mdUp.json()) as CampaignSnapshot;
+    const mdFile = snapAfterMd.files.find((f) => f.title === "志工簽到 Markdown");
+    assert.ok(mdFile);
+    assert.equal(mdFile.mimeType, "text/markdown");
+    assert.equal(mdFile.contentMd, mdContent);
+
+    // 3. Bot QUICK_PROMPTS[0] never creates bogus "並把相關待辦移轉過去組"
+    const quickPrompt = "幫我檢視目前有沒有複合組別可以拆開獨立運作，或直接幫我新增組別並把相關待辦移轉過去。";
+    const qpRes = await fetch(`${baseUrl}/api/campaigns/${cid}/bot/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: quickPrompt }),
+    });
+    assert.equal(qpRes.status, 200);
+    const afterQp = (await qpRes.json()) as CampaignSnapshot;
+    assert.ok(!afterQp.teams.some((t) => t.name.includes("並把相關待辦移轉過去")));
+
+    // Also test QUICK_PROMPTS[0] when NO compound teams remain
+    const noCompoundSnap: CampaignSnapshot = {
+      ...afterQp,
+      teams: [{ id: "tm-1", campaignId: cid, name: "議程組", lead: "", color: "rose", targetHeadcount: 4, orderIndex: 0 }],
+    };
+    const noCompReply = await replyCampaignBot(noCompoundSnap, quickPrompt, afterQp.settings, new AbortController().signal);
+    assert.equal(noCompReply.proposals.length, 0);
+    assert.match(noCompReply.content, /暫無/);
+
+    // 4. split_team with regex metacharacters (C++&AI組) and 與 separator (行銷與設計組)
+    const cppTeam = store.addTeam(cid, { name: "C++&AI組", lead: "dev", targetHeadcount: 4 });
+    store.addTodo(cid, { teamId: cppTeam.id, weekId: snap.weeks[0].id, title: "準備 C++ 講義", priority: "high" });
+    const splitCpp = await fetch(`${baseUrl}/api/campaigns/${cid}/bot/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "把「C++組」拆出來" }),
+    });
+    assert.equal(splitCpp.status, 200);
+    const afterCpp = (await splitCpp.json()) as CampaignSnapshot;
+    assert.ok(afterCpp.teams.some((t) => t.name === "C++組"));
+    assert.equal(afterCpp.teams.find((t) => t.id === cppTeam.id)?.name, "AI組");
+
+    const mktTeam = store.addTeam(cid, { name: "公關與贊助組", lead: "des", targetHeadcount: 4 });
+    const splitMkt = await fetch(`${baseUrl}/api/campaigns/${cid}/bot/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "贊助組可以獨立出來" }),
+    });
+    assert.equal(splitMkt.status, 200);
+    const afterMkt = (await splitMkt.json()) as CampaignSnapshot;
+    assert.ok(afterMkt.teams.some((t) => t.name === "贊助組"));
+    assert.equal(afterMkt.teams.find((t) => t.id === mktTeam.id)?.name, "公關組");
+
+    // 5. botAutoApply wording alignment
+    const autoOnReply = await replyCampaignBot(
+      snap,
+      "幫我把排程調成穩健緩衝",
+      { ...snap.settings, botAutoApply: true },
+      new AbortController().signal,
+    );
+    assert.match(autoOnReply.content, /已直接套用/);
+    assert.doesNotMatch(autoOnReply.content, /點擊下方卡片/);
+
+    const autoOffReply = await replyCampaignBot(
+      snap,
+      "幫我把排程調成穩健緩衝",
+      { ...snap.settings, botAutoApply: false },
+      new AbortController().signal,
+    );
+    assert.match(autoOffReply.content, /點擊下方卡片/);
+
+    // 6. Styled sheet model & XLSX edge cases: leading/trailing quote in campaign name, special chars, empty weeks/teams
+    const edgeSnap: CampaignSnapshot = {
+      ...snap,
+      campaign: { ...snap.campaign, name: "'2026 & <Edge> \"Test\"'" },
+      weeks: [],
+      teams: [],
+      cells: [],
+      todos: [],
+    };
+    const edgeModel = buildStyledSheetModel(edgeSnap);
+    assert.ok(!edgeModel.sheetName.startsWith("'"));
+    assert.ok(!edgeModel.sheetName.endsWith("'"));
+    const edgeXlsx = buildCampaignXlsxBuffer(edgeSnap);
+    assert.equal(edgeXlsx.readUInt32LE(0), 0x04034b50);
   });
 });

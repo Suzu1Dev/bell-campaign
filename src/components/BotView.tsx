@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowUpRight,
   Bot,
   Check,
   Compass,
@@ -10,10 +11,15 @@ import {
 } from "lucide-react";
 import {
   AI_PROVIDERS,
+  DEFAULT_PONYTAIL_MODE,
+  DEFAULT_THINKING_EFFORT,
   PACING_META,
+  THINKING_EFFORTS,
   type AiProvider,
   type CampaignSnapshot,
+  type PonytailMode,
   type ProviderSettings,
+  type ThinkingEffort,
 } from "../../shared/types";
 import { computeCampaignMetrics } from "../../shared/sheets";
 import { apiWrite } from "../lib/api";
@@ -26,10 +32,128 @@ const PROVIDER_LABELS: Record<AiProvider, string> = {
   api: "OpenAI 相容 API",
 };
 
+const PROVIDER_SHORT: Record<AiProvider, string> = {
+  builtin: "內建引擎",
+  codex: "Codex CLI",
+  claude: "Claude CLI",
+  antigravity: "Antigravity CLI",
+  api: "外部 API",
+};
+
+const PROVIDER_MODEL_PRESETS: Record<Exclude<AiProvider, "builtin">, Array<{ id: string; label: string }>> = {
+  antigravity: [
+    { id: "gemini-4-hydrogen", label: "Hydrogen · 旗艦" },
+    { id: "gemini-4-carbon", label: "Carbon · 均衡" },
+    { id: "gemini-3.8-flash", label: "3.8 Flash · 極速" },
+    { id: "claude-sonnet-5-5", label: "Sonnet 5.5" },
+    { id: "claude-opus-5-5", label: "Opus 5.5" },
+  ],
+  claude: [
+    { id: "claude-sonnet-5-5", label: "Sonnet 5.5 · 均衡" },
+    { id: "claude-opus-5-5", label: "Opus 5.5 · 旗艦" },
+    { id: "claude-haiku-4-5", label: "Haiku 4.5 · 極速" },
+  ],
+  codex: [
+    { id: "gpt-5.2-codex", label: "GPT-5.2 Codex" },
+    { id: "o4-mini", label: "o4-mini" },
+  ],
+  api: [
+    { id: "gpt-4.1", label: "GPT-4.1" },
+    { id: "gpt-4.1-mini", label: "GPT-4.1 Mini" },
+    { id: "o4-mini", label: "o4-mini" },
+  ],
+};
+
+const DEPTH_META: Record<
+  ThinkingEffort,
+  {
+    level: number;
+    shortLabel: string;
+    enLabel: string;
+    title: string;
+    speedTag: string;
+    sceneTag: string;
+    desc: string;
+  }
+> = {
+  low: {
+    level: 1,
+    shortLabel: "速答",
+    enLabel: "Low",
+    title: "速答直覺 · 秒級執行",
+    speedTag: "最快 · 最省額度",
+    sceneTag: "單一指令",
+    desc: "省略多層推演，適合新增單筆待辦、勾選完成、快速記筆記等明確操作。",
+  },
+  medium: {
+    level: 2,
+    shortLabel: "均衡",
+    enLabel: "Med",
+    title: "均衡推演 · 日常協作預設",
+    speedTag: "快 · 平衡",
+    sceneTag: "拆組／改時程",
+    desc: "先核對目前組別與週次再執行，兼顧回應速度與邏輯完整度，適合大多數籌備對話。",
+  },
+  high: {
+    level: 3,
+    shortLabel: "深入",
+    enLabel: "High",
+    title: "深入推演 · 跨組相依檢查",
+    speedTag: "中速 · 深入",
+    sceneTag: "跨組重組",
+    desc: "主動比對跨組交接、撞期週次與人力缺口，適合拆分組別、批次移轉待辦與調緊湊度。",
+  },
+  xhigh: {
+    level: 4,
+    shortLabel: "縝密",
+    enLabel: "XHigh",
+    title: "縝密全盤 · 依賴鏈與瓶頸盤點",
+    speedTag: "較慢 · 高推理",
+    sceneTag: "長程規劃",
+    desc: "逐週檢驗前後置依賴與驗收緩衝，適合多月份倒數排程與大型活動分工健檢。",
+  },
+  max: {
+    level: 5,
+    shortLabel: "極限",
+    enLabel: "Max",
+    title: "極限推演 · 全專案深度決策",
+    speedTag: "最深 · 耗時較長",
+    sceneTag: "賽制／全盤重排",
+    desc: "投入最高推理深度審視賽制、多校資源衝突與風險邊界，一次產出完整連動變更。",
+  },
+};
+
+const PONYTAIL_SELECT_ORDER: readonly PonytailMode[] = ["ultra", "full", "lite", "off"];
+
+const PONYTAIL_SHORT: Record<PonytailMode, string> = {
+  ultra: "Ultra",
+  full: "Full",
+  lite: "Lite",
+  off: "Off",
+};
+
+const PONYTAIL_BADGES: Record<PonytailMode, string> = {
+  ultra: "Ponytail · Ultra",
+  full: "Ponytail · Full",
+  lite: "Ponytail · Lite",
+  off: "Ponytail · Off",
+};
+
+const PONYTAIL_HINTS: Record<PonytailMode, string> = {
+  ultra: "預設啟用：主動點破過密排程與冗餘分工，砍除客套鋪陳並附精簡取捨提醒。",
+  full: "以最少必要行動解決問題，回覆精簡口語專業並附略過項與風險備註。",
+  lite: "保留完整建議，省去客套開場與冗長背景鋪陳。",
+  off: "不套用精簡限制，保留完整展開說明與指令範例。",
+};
+
 const QUICK_PROMPTS = [
   {
+    label: "獨立／拆分組別並移轉待辦",
+    prompt: "幫我檢視目前有沒有複合組別可以拆開獨立運作，或直接幫我新增組別並把相關待辦移轉過去。",
+  },
+  {
     label: "對焦專案性質與靈感借鏡",
-    prompt: "我們這次專案預計舉辦 160 人的跨域社群交流活動，包含主題與談與圓桌互動，請幫我規劃專案性質定位並更新靈感借鏡案例。",
+    prompt: "我們這次專案預計舉辦跨校新手資安競賽，請幫我精煉專案定位並更新靈感借鏡案例。",
   },
   {
     label: "從本週展開跨月長程倒數週數",
@@ -40,16 +164,12 @@ const QUICK_PROMPTS = [
     prompt: "幫我把整體排程調整成穩健緩衝節奏，避開撞期大活動並保留兩週驗收緩衝。",
   },
   {
-    label: "盤點招工表單缺口",
-    prompt: "幫我盤點目前招工表單各組缺口，並推薦優先錄取的候選志工。",
-  },
-  {
-    label: "生成講者行前手冊",
-    prompt: "請幫我自動生成一份給與談講者的行前手冊並歸檔。",
+    label: "生成講者／工作人員手冊",
+    prompt: "請幫我自動生成一份給籌備幹部與志工的行前懶人包手冊並歸檔。",
   },
   {
     label: "擬定下次週會大綱",
-    prompt: "請幫我建立本週籌備週會的會前大綱、議程安排與注意事項。",
+    prompt: "請幫我建立下次籌備週會的會前大綱、議程安排與注意事項。",
   },
 ] as const;
 
@@ -66,10 +186,12 @@ function renderFormattedText(content: string) {
 export default function BotView({
   snapshot,
   onSnapshot,
+  onNavigateForms,
   notify,
 }: {
   snapshot: CampaignSnapshot;
   onSnapshot: (next: CampaignSnapshot) => void;
+  onNavigateForms?: () => void;
   notify: (msg: string) => void;
 }) {
   const metrics = useMemo(() => computeCampaignMetrics(snapshot), [snapshot]);
@@ -167,11 +289,35 @@ export default function BotView({
             <div>
               <div style={{ fontSize: 14, fontWeight: 700 }}>Campaign Bot · 專案全控助理</div>
               <div style={{ fontSize: 12, color: "var(--text-3)" }}>
-                可直接對話請它調整時程節奏、新增待辦、生成講者／籌備手冊、撰寫會議大綱或審核招工表單
+                聽完需求即主動完成拆組／建組、移轉待辦、調排程節奏、生成手冊、建會議與管理合作名單
               </div>
             </div>
           </div>
-          <span className="pill pill-campaign">{PROVIDER_LABELS[snapshot.settings.provider]}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            {(() => {
+              const mode = snapshot.settings.ponytailMode ?? DEFAULT_PONYTAIL_MODE;
+              const effort = snapshot.settings.thinkingEffort ?? DEFAULT_THINKING_EFFORT;
+              const autoExec = snapshot.settings.botAutoApply !== false;
+              return (
+                <>
+                  {autoExec && (
+                    <span className="pill pill-ok" title="聽完需求後自動執行非刪除類變更">
+                      <Check size={11} />
+                      <span>主動執行中</span>
+                    </span>
+                  )}
+                  <span className="pill" title={DEPTH_META[effort].title}>
+                    <span>思考 · {DEPTH_META[effort].shortLabel}</span>
+                  </span>
+                  <span className={mode === "off" ? "pill" : "pill pill-campaign"}>
+                    <Zap size={11} />
+                    <span>{PONYTAIL_BADGES[mode]}</span>
+                  </span>
+                  <span className="pill">{PROVIDER_SHORT[snapshot.settings.provider]}</span>
+                </>
+              );
+            })()}
+          </div>
         </header>
 
         <div ref={scrollRef} className="bot-messages">
@@ -187,7 +333,7 @@ export default function BotView({
                   {msg.proposals.map((prop) => {
                     const busy = applyingId === prop.id;
                     return (
-                      <div key={prop.id} className="proposal-card">
+                      <div key={prop.id} className={`proposal-card ${prop.applied ? "is-applied" : ""}`}>
                         <div style={{ minWidth: 0, flex: 1 }}>
                           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>
                             {prop.summary}
@@ -201,7 +347,7 @@ export default function BotView({
                         {prop.applied ? (
                           <span className="pill pill-ok">
                             <Check size={12} />
-                            <span>已套用</span>
+                            <span>已完成</span>
                           </span>
                         ) : (
                           <button
@@ -211,7 +357,7 @@ export default function BotView({
                             onClick={() => void applyProposal(msg.id, prop.id)}
                           >
                             <Zap size={12} />
-                            <span>{busy ? "套用中…" : "套用變更"}</span>
+                            <span>{busy ? "執行中…" : "確認執行"}</span>
                           </button>
                         )}
                       </div>
@@ -315,19 +461,20 @@ export default function BotView({
                 {metrics.conflictWeekCount} 週
               </div>
             </div>
-            <div
-              style={{
-                padding: "8px 10px",
-                borderRadius: "var(--radius-sm)",
-                background: "var(--panel)",
-                border: "1px solid var(--line)",
-              }}
+            <button
+              type="button"
+              className={`bot-pulse-btn ${pendingFormCount > 0 ? "is-attention" : ""}`}
+              onClick={() => (onNavigateForms ? onNavigateForms() : (window.location.hash = "#/forms"))}
+              title="前往招工表單審核報名名單"
             >
-              <div style={{ fontSize: 11.5, color: "var(--text-3)" }}>待審招工</div>
-              <div className="tabular" style={{ fontSize: 16, fontWeight: 700 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 11.5, color: "var(--text-3)" }}>
+                <span>待審招工</span>
+                <ArrowUpRight size={12} style={{ color: pendingFormCount > 0 ? "var(--campaign-text)" : "var(--text-3)" }} />
+              </div>
+              <div className="tabular" style={{ fontSize: 16, fontWeight: 700, color: pendingFormCount > 0 ? "var(--campaign-text)" : "var(--text)" }}>
                 {pendingFormCount} 筆
               </div>
-            </div>
+            </button>
           </div>
         </div>
 
@@ -357,14 +504,103 @@ export default function BotView({
           ))}
         </div>
 
-        <div className="card" style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 700 }}>
-            <Cpu size={15} style={{ color: "var(--campaign-text)" }} />
-            <span>AI 引擎供應商</span>
+        <div className="card ai-studio-card">
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13.5, fontWeight: 700 }}>
+              <Cpu size={15} style={{ color: "var(--campaign-text)" }} />
+              <span>AI 決策與思考設定</span>
+            </div>
+            <span className="ai-section-meta">
+              {PROVIDER_SHORT[snapshot.settings.provider]}
+            </span>
           </div>
-          <div>
-            <label className="field-label" htmlFor="bot-provider-select">
-              推論模式
+
+          {/* 1. Proactive Task Auto-Execution Switch */}
+          {(() => {
+            const autoExec = snapshot.settings.botAutoApply !== false;
+            return (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={autoExec}
+                className={`auto-exec-toggle ${autoExec ? "is-on" : ""}`}
+                onClick={() => void updateProvider({ botAutoApply: !autoExec })}
+              >
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>
+                    聽完需求主動完成任務
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--text-3)", lineHeight: 1.42, marginTop: 2 }}>
+                    {autoExec
+                      ? "開啟中：拆組、建組、移轉待辦與調時程直接生效（刪除仍需確認）"
+                      : "僅提出建議卡片，需逐張手動點擊執行才會變更專案"}
+                  </div>
+                </div>
+                <span className={`switch-track ${autoExec ? "is-on" : ""}`}>
+                  <span className="switch-thumb" />
+                </span>
+              </button>
+            );
+          })()}
+
+          {/* 2. Tactile 5-Level Thinking Depth Dial */}
+          {(() => {
+            const activeEffort = snapshot.settings.thinkingEffort ?? DEFAULT_THINKING_EFFORT;
+            const meta = DEPTH_META[activeEffort];
+            return (
+              <div className="ai-studio-section">
+                <div className="ai-section-head">
+                  <span className="ai-section-title">模型思考深度</span>
+                  <span className="ai-section-meta">
+                    {meta.enLabel.toUpperCase()} · {meta.level}/5
+                  </span>
+                </div>
+                <div className="depth-dial" role="radiogroup" aria-label="模型思考深度">
+                  {THINKING_EFFORTS.map((eff) => {
+                    const item = DEPTH_META[eff];
+                    const isActive = eff === activeEffort;
+                    return (
+                      <button
+                        key={eff}
+                        type="button"
+                        role="radio"
+                        aria-checked={isActive}
+                        className={`depth-stop ${isActive ? "is-active" : ""}`}
+                        onClick={() => void updateProvider({ thinkingEffort: eff })}
+                      >
+                        <span className="depth-bars" aria-hidden="true">
+                          {[1, 2, 3, 4, 5].map((barIdx) => (
+                            <span
+                              key={barIdx}
+                              className={`depth-bar ${barIdx <= item.level ? "is-lit" : ""}`}
+                              style={{ height: 3 + barIdx * 1.8 }}
+                            />
+                          ))}
+                        </span>
+                        <span className="depth-stop-label">{item.shortLabel}</span>
+                        <span className="depth-stop-en">{item.enLabel}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="depth-readout">
+                  <div className="depth-readout-top">
+                    <span className="depth-readout-title">{meta.title}</span>
+                    <div className="depth-readout-tags">
+                      <span className="depth-tag">{meta.speedTag}</span>
+                      <span className="depth-tag">{meta.sceneTag}</span>
+                    </div>
+                  </div>
+                  <div className="depth-readout-desc">{meta.desc}</div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* 3. Provider & One-Click Model Selector */}
+          <div className="ai-studio-section">
+            <label className="field-label" htmlFor="bot-provider-select" style={{ marginBottom: 2 }}>
+              推論引擎與模型
             </label>
             <select
               id="bot-provider-select"
@@ -378,29 +614,81 @@ export default function BotView({
                 </option>
               ))}
             </select>
-            <div style={{ fontSize: 12, color: "var(--text-3)", lineHeight: 1.5, marginTop: 6 }}>
-              {snapshot.settings.provider === "builtin"
-                ? "預設採用本地端結構化排程與規則引擎，免設定 API 金鑰、無外部網路等待即可操作時程、手冊與名單；亦可切換為外部大模型。"
-                : "將透過外部 CLI 或 API 大語言模型生成回覆，若外部服務連線逾時會自動回退至內建引擎保底。"}
-            </div>
+            {snapshot.settings.provider === "builtin" ? (
+              <div style={{ fontSize: 12, color: "var(--text-3)", lineHeight: 1.48 }}>
+                本地結構化規則引擎，免金鑰即刻執行組別拆分、時程與手冊；切換上方外部供應商可啟用大模型深度推演。
+              </div>
+            ) : (
+              <>
+                <div className="model-chip-row" aria-label="推薦模型快速切換">
+                  {PROVIDER_MODEL_PRESETS[snapshot.settings.provider].map((preset) => {
+                    const cleanCurrent = snapshot.settings.model.replace(/-(low|medium|high|xhigh|max)$/i, "");
+                    const isSelected = cleanCurrent === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        className={`model-chip ${isSelected ? "is-active" : ""}`}
+                        onClick={() => {
+                          setModelDraft(preset.id);
+                          void updateProvider({ model: preset.id });
+                        }}
+                      >
+                        {preset.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                  <input
+                    className="input"
+                    placeholder="或輸入自訂模型 ID（留空用預設）"
+                    value={modelDraft}
+                    onChange={(e) => setModelDraft(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => void updateProvider({ model: modelDraft })}
+                  >
+                    儲存
+                  </button>
+                </div>
+              </>
+            )}
           </div>
-          {snapshot.settings.provider !== "builtin" && (
-            <div style={{ display: "flex", gap: 6 }}>
-              <input
-                className="input"
-                placeholder="選填模型名稱"
-                value={modelDraft}
-                onChange={(e) => setModelDraft(e.target.value)}
-              />
-              <button
-                type="button"
-                className="btn"
-                onClick={() => void updateProvider({ model: modelDraft })}
-              >
-                儲存
-              </button>
-            </div>
-          )}
+
+          {/* 4. Ponytail Efficiency 4-Stop Control */}
+          {(() => {
+            const activeMode = snapshot.settings.ponytailMode ?? DEFAULT_PONYTAIL_MODE;
+            return (
+              <div className="ai-studio-section">
+                <div className="ai-section-head">
+                  <span className="ai-section-title">Ponytail 效率模式</span>
+                  <span className="ai-section-meta">
+                    {activeMode === "ultra" ? "預設 · 主動精簡" : PONYTAIL_SHORT[activeMode]}
+                  </span>
+                </div>
+                <div className="ponytail-seg-grid" role="radiogroup" aria-label="Ponytail 效率模式">
+                  {PONYTAIL_SELECT_ORDER.map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      role="radio"
+                      aria-checked={m === activeMode}
+                      className={`ponytail-seg-btn ${m === activeMode ? "is-active" : ""}`}
+                      onClick={() => void updateProvider({ ponytailMode: m })}
+                    >
+                      {PONYTAIL_SHORT[m]}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ fontSize: 12, color: "var(--text-3)", lineHeight: 1.48 }}>
+                  {PONYTAIL_HINTS[activeMode]}
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </aside>
     </div>

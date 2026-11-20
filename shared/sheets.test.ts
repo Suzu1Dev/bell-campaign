@@ -26,6 +26,8 @@ import {
   personalTaskHref,
   prDraftHref,
 } from "./suite.js";
+import { buildSlidesDeckModel, renderSingleSlideHtml } from "./exporters.js";
+import { isSafeMarkdownUrl, parseMarkdownBlocks } from "./markdown.js";
 import { CampaignStore } from "../server/store.js";
 
 const REFERENCE_GSHEET_CSV = `,月,六月,,七月,,,,八月
@@ -267,4 +269,61 @@ test("Bidirectional Google Docs & HackMD meeting parser round-trips cleanly and 
   });
   assert.ok(ctfCurated.some((c) => /LiveCTF/i.test(c.title)));
   assert.ok(ctfCurated.some((c) => /資安社/.test(c.title)));
+});
+
+test("renderSingleSlideHtml matrix wraps .dk-mx-team inside <td> and Markdown parser handles GFM + XSS safely", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bell-campaign-md-"));
+  try {
+    const store = new CampaignStore(join(dir, "campaign.db"), join(dir, "uploads"));
+    const snap = store.getSnapshot();
+    const slides = buildSlidesDeckModel(snap);
+    const matrixSlide = slides.find((s) => s.kind === "matrix");
+    assert.ok(matrixSlide);
+    const matrixHtml = renderSingleSlideHtml(matrixSlide, snap.campaign.name, slides.length);
+    assert.match(matrixHtml, /<td><div class="dk-mx-team">/);
+    assert.doesNotMatch(matrixHtml, /<td class="dk-mx-team">/);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  // Safe URL checks
+  assert.equal(isSafeMarkdownUrl("https://example.com/a"), true);
+  assert.equal(isSafeMarkdownUrl("http://127.0.0.1:21105/#/schedule"), true);
+  assert.equal(isSafeMarkdownUrl("/api/files/1/raw"), true);
+  assert.equal(isSafeMarkdownUrl("#section"), true);
+  assert.equal(isSafeMarkdownUrl("javascript:alert(1)"), false);
+  assert.equal(isSafeMarkdownUrl("data:text/html,<script>alert(1)</script>"), false);
+
+  const md = `# 籌備手冊
+> 注意 **9:00** 準時報到
+
+---
+
+- [x] 已完成 \`場勘\`
+- [ ] 待確認 [官方網站](https://example.com) 與 [危險連結](javascript:alert(1))
+
+| 組別 | 窗口 |
+| :--- | ---: |
+| 行銷組 | 3 |
+
+\`\`\`bash
+echo "hello"
+\`\`\`
+`;
+  const blocks = parseMarkdownBlocks(md);
+  assert.equal(blocks[0]?.type, "heading");
+  assert.equal(blocks[1]?.type, "blockquote");
+  assert.equal(blocks[2]?.type, "hr");
+  assert.equal(blocks[3]?.type, "list");
+  if (blocks[3]?.type === "list") {
+    assert.equal(blocks[3].items[0]?.checked, true);
+    assert.equal(blocks[3].items[1]?.checked, false);
+    const spans = blocks[3].items[1]?.spans ?? [];
+    assert.ok(spans.some((s) => s.type === "link" && s.href === "https://example.com"));
+    assert.ok(!spans.some((s) => s.type === "link" && s.href.startsWith("javascript:")));
+    assert.ok(spans.some((s) => s.type === "text" && s.text === "危險連結"));
+  }
+  assert.equal(blocks[4]?.type, "table");
+  assert.equal(blocks[5]?.type, "code");
 });

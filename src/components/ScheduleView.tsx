@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   AlertTriangle,
@@ -15,8 +16,11 @@ import {
   FileSpreadsheet,
   Flag,
   Gauge,
+  Maximize2,
+  Minimize2,
   Plus,
   Presentation,
+  Printer,
   Share2,
   Sparkles,
   Trash2,
@@ -38,7 +42,6 @@ import {
   type WeekEventItem,
 } from "../../shared/types";
 import {
-  buildAppsScriptSyncCode,
   buildGoogleSheetMatrix,
   buildPacingSchedulePreview,
   buildWeeklyDigestText,
@@ -48,7 +51,14 @@ import {
   matrixToTsv,
   stageToPercent,
 } from "../../shared/sheets";
+import {
+  buildFormattedAppsScriptCode,
+  buildGoogleSlidesAppsScript,
+  buildSlidesDeckModel,
+  buildStyledSheetClipboardHtml,
+} from "../../shared/exporters";
 import { apiWrite } from "../lib/api";
+import { DeckSlideView, ScaledDeckStage, StyledSheetMiniPreview } from "./ExportStudioPreview";
 
 function stageSpanClass(stage: CellStage): string {
   if (stage === "待排") return "stage-span-bar is-idle";
@@ -144,6 +154,32 @@ export default function ScheduleView({
   const [shareOpen, setShareOpen] = useState(false);
   const [shareTab, setShareTab] = useState<"sheets" | "slides" | "team">("sheets");
   const [slideIdx, setSlideIdx] = useState(0);
+  const [deckTheme, setDeckTheme] = useState<"light" | "dark">("light");
+  const [deckFullscreen, setDeckFullscreen] = useState(false);
+  const [printingDeck, setPrintingDeck] = useState(false);
+  const deckSlides = useMemo(() => buildSlidesDeckModel(snapshot), [snapshot]);
+  const safeSlideIdx = deckSlides.length > 0 ? slideIdx % deckSlides.length : 0;
+
+  useEffect(() => {
+    if (!deckFullscreen && !(shareOpen && shareTab === "slides")) return;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        setSlideIdx((i) => (i + 1) % Math.max(1, deckSlides.length));
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setSlideIdx((i) => (i - 1 + Math.max(1, deckSlides.length)) % Math.max(1, deckSlides.length));
+      } else if (e.key === "Escape" && deckFullscreen) {
+        e.preventDefault();
+        setDeckFullscreen(false);
+        setShareOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [deckFullscreen, shareOpen, shareTab, deckSlides.length]);
 
   // Cell editor state (team weekly focus, cross-team & todos only — progress stage lives in unified top bar)
   const [editingCell, setEditingCell] = useState<{
@@ -197,27 +233,51 @@ export default function ScheduleView({
     "世界咖啡館：確認圓桌引導手卡與換桌動線\nPanel 與談：收齊 4 位與談人最終投影片備份\n行銷與設計組：排定倒數貼文並避開週末撞期高峰\n場務與志工組：完成報到 QR 驗票壓力測試與茶點確認",
   );
   const [aiBusy, setAiBusy] = useState(false);
-  const [aiServerPreview, setAiServerPreview] = useState<AutoSchedulePreview | null>(null);
+  const [aiServerPreview, setAiServerPreview] = useState<{ key: string; preview: AutoSchedulePreview } | null>(null);
+  const aiInputsKey = useMemo(
+    () => JSON.stringify({ mainGoal, monthlyGoals, tasksText, pacing }),
+    [mainGoal, monthlyGoals, tasksText, pacing],
+  );
 
   // Live instant pacing preview so dragging/clicking pacing stops responds in 0ms!
   const livePreview = useMemo(
     () =>
-      aiServerPreview && aiServerPreview.pacing === pacing
-        ? aiServerPreview
+      aiServerPreview && aiServerPreview.key === aiInputsKey
+        ? aiServerPreview.preview
         : buildPacingSchedulePreview(snapshot, {
             mainGoal,
             monthlyGoals,
             tasksText,
             pacing,
           }),
-    [aiServerPreview, snapshot, mainGoal, monthlyGoals, tasksText, pacing],
+    [aiServerPreview, aiInputsKey, snapshot, mainGoal, monthlyGoals, tasksText, pacing],
   );
 
   // Sheet import state inside Share dialog
   const [sheetUrlInput, setSheetUrlInput] = useState(snapshot.campaign.sheetUrl);
   const [slidesUrlInput, setSlidesUrlInput] = useState(snapshot.campaign.slidesUrl);
+  useEffect(() => {
+    setSheetUrlInput(snapshot.campaign.sheetUrl);
+    setSlidesUrlInput(snapshot.campaign.slidesUrl);
+  }, [snapshot.campaign.id, snapshot.campaign.sheetUrl, snapshot.campaign.slidesUrl]);
   const [csvImportText, setCsvImportText] = useState("");
   const [importBusy, setImportBusy] = useState(false);
+
+  // Matrix Quick-Jump & Conflict Radar cycling
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const weekHeadRefs = useRef<Record<string, HTMLTableCellElement | null>>({});
+  const highlightTimerRef = useRef<number | null>(null);
+  const [pendingJumpWeekId, setPendingJumpWeekId] = useState<string | null>(null);
+  const [highlightedWeekId, setHighlightedWeekId] = useState<string | null>(null);
+  const [conflictIdx, setConflictIdx] = useState(0);
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current !== null) {
+        window.clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, []);
 
   const currentPacingMeta = PACING_META.find((p) => p.id === snapshot.campaign.pacing) ?? PACING_META[2];
 
@@ -402,7 +462,7 @@ export default function ScheduleView({
         "POST",
         { mainGoal, monthlyGoals, tasksText, pacing },
       );
-      setAiServerPreview(preview);
+      setAiServerPreview({ key: aiInputsKey, preview });
       notify("已依緊湊度生成排程預覽");
     } catch (err) {
       notify(err instanceof Error ? err.message : "AI 排程預覽失敗");
@@ -477,6 +537,41 @@ export default function ScheduleView({
     notify(`已複製${label}`);
   }
 
+  async function copyFormattedSheet() {
+    const html = buildStyledSheetClipboardHtml(snapshot);
+    const plain = matrixToTsv(buildGoogleSheetMatrix(snapshot));
+    try {
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/html": new Blob([html], { type: "text/html" }),
+            "text/plain": new Blob([plain], { type: "text/plain" }),
+          }),
+        ]);
+        notify("已複製「帶完整色彩、自動換行與合併儲存格」表格，請在 Google 試算表 A1 按 ⌘V 貼上（若需連同 230px 寬欄一次到位，建議下載 .xlsx 匯入）");
+        return;
+      }
+    } catch {
+      // Fallback to TSV if browser blocks rich clipboard write
+    }
+    await navigator.clipboard.writeText(plain);
+    notify("已複製試算表矩陣（建議搭配下載 .xlsx 以完整保留色彩與合併儲存格）");
+  }
+
+  function triggerPrintDeck() {
+    setPrintingDeck(true);
+    const cleanup = () => {
+      setPrintingDeck(false);
+      window.removeEventListener("afterprint", cleanup);
+    };
+    window.addEventListener("afterprint", cleanup);
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        window.print();
+      }, 80);
+    });
+  }
+
   const conflictEvents = useMemo(
     () =>
       orderedWeeks.flatMap((w) =>
@@ -486,6 +581,61 @@ export default function ScheduleView({
       ),
     [orderedWeeks],
   );
+
+  const conflictWeeks = useMemo(
+    () => orderedWeeks.filter((w) => w.majorEvents.some((e) => e.kind === "conflict")),
+    [orderedWeeks],
+  );
+
+  const eventWeek = useMemo(
+    () => orderedWeeks.find((w) => w.phase === "event") ?? null,
+    [orderedWeeks],
+  );
+
+  const currentWeek = useMemo(() => {
+    const now = new Date();
+    const todayIso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    return (
+      orderedWeeks.find((w) => w.startDate && w.endDate && todayIso >= w.startDate && todayIso <= w.endDate) ??
+      orderedWeeks.find((w) => (metrics.weekProgress[w.id]?.percent ?? 0) < 100 && w.phase === "prep") ??
+      eventWeek ??
+      orderedWeeks[0] ??
+      null
+    );
+  }, [orderedWeeks, metrics.weekProgress, eventWeek]);
+
+  function jumpToWeek(weekId: string) {
+    if (monthFilter !== "all" && !visibleWeeks.some((w) => w.id === weekId)) {
+      setMonthFilter("all");
+    }
+    setPendingJumpWeekId(weekId);
+    setHighlightedWeekId(weekId);
+    if (highlightTimerRef.current !== null) {
+      window.clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = window.setTimeout(() => {
+      setHighlightedWeekId(null);
+      highlightTimerRef.current = null;
+    }, 2200);
+  }
+
+  useEffect(() => {
+    if (!pendingJumpWeekId) return;
+    const vp = viewportRef.current;
+    const th = weekHeadRefs.current[pendingJumpWeekId];
+    if (!vp || !th) return;
+    const stickyW = vp.querySelector<HTMLElement>(".sticky-col")?.getBoundingClientRect().width ?? 172;
+    vp.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    vp.scrollTo({ left: Math.max(0, th.offsetLeft - stickyW - 12), behavior: "smooth" });
+    setPendingJumpWeekId(null);
+  }, [pendingJumpWeekId, visibleWeeks]);
+
+  function handleConflictCardClick() {
+    if (conflictWeeks.length === 0) return;
+    const target = conflictWeeks[conflictIdx % conflictWeeks.length];
+    jumpToWeek(target.id);
+    setConflictIdx((i) => (i + 1) % conflictWeeks.length);
+  }
 
   return (
     <>
@@ -550,19 +700,49 @@ export default function ScheduleView({
           </div>
         </div>
 
-        <div className="kpi-card">
-          <div className="kpi-head">
-            <span>撞期與風險雷達</span>
-            <AlertTriangle size={14} style={{ color: conflictEvents.length > 0 ? "var(--warn)" : "var(--text-3)" }} />
+        {conflictWeeks.length > 0 ? (
+          <button
+            type="button"
+            className="kpi-card kpi-card-btn"
+            onClick={handleConflictCardClick}
+            aria-label={`跳至撞期週次（共 ${conflictEvents.length} 處警示，點擊依序定位）`}
+            title="點擊依序跳至標記撞期的週次欄位"
+          >
+            <div className="kpi-head">
+              <span>撞期與風險雷達</span>
+              <AlertTriangle size={14} style={{ color: "var(--warn)" }} />
+            </div>
+            <div className="kpi-value tabular">
+              {conflictEvents.length} 處{" "}
+              <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text-3)" }}>大型撞期警示</span>
+            </div>
+            <div
+              style={{
+                fontSize: 12.5,
+                color: "var(--warn)",
+                fontWeight: 500,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {conflictEvents[0] ? `${conflictEvents[0].week.dateRange} ${conflictEvents[0].event.title} · 點擊定位 →` : ""}
+            </div>
+          </button>
+        ) : (
+          <div className="kpi-card">
+            <div className="kpi-head">
+              <span>撞期與風險雷達</span>
+              <AlertTriangle size={14} style={{ color: "var(--text-3)" }} />
+            </div>
+            <div className="kpi-value tabular">
+              0 處 <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text-3)" }}>大型撞期警示</span>
+            </div>
+            <div style={{ fontSize: 12.5, color: "var(--text-3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              各週時段無外部撞期
+            </div>
           </div>
-          <div className="kpi-value tabular">
-            {conflictEvents.length} 處{" "}
-            <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text-3)" }}>大型撞期警示</span>
-          </div>
-          <div style={{ fontSize: 12.5, color: "var(--text-3)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            {conflictEvents[0] ? `${conflictEvents[0].week.dateRange} ${conflictEvents[0].event.title}` : "各週時段無外部撞期"}
-          </div>
-        </div>
+        )}
 
         <div
           className="kpi-card"
@@ -607,6 +787,26 @@ export default function ScheduleView({
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            {orderedWeeks.length > 1 && currentWeek && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => jumpToWeek(currentWeek.id)}
+                title={`定位至：${currentWeek.countdownLabel}（${currentWeek.dateRange}）`}
+              >
+                <span>跳至本週</span>
+              </button>
+            )}
+            {orderedWeeks.length > 1 && eventWeek && eventWeek.id !== currentWeek?.id && (
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => jumpToWeek(eventWeek.id)}
+                title={`定位至：${eventWeek.countdownLabel}（${eventWeek.dateRange}）`}
+              >
+                <span>跳至活動週</span>
+              </button>
+            )}
             <button type="button" className="btn btn-sm" onClick={openTimelineDialog}>
               <CalendarRange size={13} />
               <span>時程區間 · 週數</span>
@@ -666,14 +866,18 @@ export default function ScheduleView({
           </div>
         )}
 
-        <div className="matrix-viewport">
+        <div className="matrix-viewport" ref={viewportRef}>
           <table className="schedule-table">
             <thead>
               {/* Row 1: Month Spans */}
               <tr>
                 <th className="sticky-col month-band-cell">月份 ／ 組別</th>
                 {monthSpans.map((m, idx) => (
-                  <th key={`${m.label}-${idx}`} colSpan={m.span} className="month-band-cell">
+                  <th
+                    key={`${m.label}-${idx}`}
+                    colSpan={m.span}
+                    className={`month-band-cell ${idx < monthSpans.length - 1 ? "is-month-end" : ""}`}
+                  >
                     {m.label}
                   </th>
                 ))}
@@ -683,7 +887,7 @@ export default function ScheduleView({
               <tr className="project-progress-row">
                 <th
                   className="sticky-col project-progress-sticky"
-                  title={`已完成 ${metrics.completedTodos}/${metrics.totalTodos} 項待辦 · 點擊右側任一階段可調整`}
+                  title={`已完成 ${metrics.completedTodos}/${metrics.totalTodos} 項 · 點擊右側階段可調整`}
                 >
                   <div className="project-progress-sticky-inner">
                     <span className="project-progress-label">整體進度</span>
@@ -712,7 +916,7 @@ export default function ScheduleView({
                       <button
                         type="button"
                         className={stageSpanClass(run.stage)}
-                        title="點擊調整此週期的整體專案完成進度階段與延續週數"
+                        title="點擊調整進度階段與週數"
                         onClick={() => openWeekEditor(firstWeek, run.weeks.length)}
                       >
                         <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
@@ -721,7 +925,7 @@ export default function ScheduleView({
                         </span>
                         {run.weeks.length > 1 ? (
                           <span className="stage-span-meta">
-                            連續 {run.weeks.length} 週 · {startDay}–{endDay}
+                            {run.weeks.length} 週 · {startDay}–{endDay}
                           </span>
                         ) : showMeter ? (
                           <span className="stage-inline-meter" aria-hidden="true">
@@ -735,19 +939,25 @@ export default function ScheduleView({
               </tr>
 
               {/* Row 3: Week Countdown, Dates, and Major Events / Clashing Activities */}
-              <tr>
+              <tr className="week-header-row">
                 <th className="sticky-col" style={{ padding: "10px 12px", background: "var(--panel)" }}>
-                  <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text-2)" }}>倒數週數 ／ 撞期雷達</div>
-                  <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 3, fontWeight: 400 }}>
-                    點擊週次記錄撞期活動或重要死線
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>倒數週數 ／ 撞期</div>
+                  <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 2, fontWeight: 400 }}>
+                    點週次記死線或撞期
                   </div>
                 </th>
-                {visibleWeeks.map((week) => {
+                {visibleWeeks.map((week, wIdx) => {
                   const wp = metrics.weekProgress[week.id] ?? { percent: 0, done: 0, total: 0, hasConflict: false };
+                  const nextWeek = visibleWeeks[wIdx + 1];
+                  const isMonthEnd = Boolean(nextWeek && nextWeek.monthLabel !== week.monthLabel);
                   return (
                     <th
                       key={week.id}
-                      className={`week-head-cell ${week.phase === "event" ? "is-event-week" : ""} ${wp.hasConflict ? "has-conflict" : ""}`}
+                      ref={(el) => {
+                        weekHeadRefs.current[week.id] = el;
+                      }}
+                      data-week-id={week.id}
+                      className={`week-head-cell ${week.phase === "event" ? "is-event-week" : ""} ${wp.hasConflict ? "has-conflict" : ""} ${isMonthEnd ? "is-month-end" : ""} ${highlightedWeekId === week.id ? "is-jump-highlight" : ""}`}
                       onClick={() => openWeekEditor(week, 1)}
                     >
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4 }}>
@@ -767,8 +977,8 @@ export default function ScheduleView({
                       ))}
 
                       {week.memo && (
-                        <div style={{ marginTop: 5, fontSize: 11.5, color: "var(--text-3)", fontWeight: 400 }}>
-                          備註：{week.memo}
+                        <div style={{ marginTop: 5, fontSize: 11.5, color: "var(--text-2)", fontWeight: 600 }}>
+                          {week.memo}
                         </div>
                       )}
                     </th>
@@ -782,20 +992,20 @@ export default function ScheduleView({
                 const tp = metrics.teamProgress[team.id] ?? { percent: 0, done: 0, total: 0, latestStage: "待排" };
 
                 return (
-                  <tr key={team.id}>
+                  <tr key={team.id} className="team-matrix-row">
                     <td className="sticky-col team-row-header">
                       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                         <span className={`team-dot team-dot-${team.color}`} />
-                        <strong style={{ fontSize: 13.5 }}>{team.name}</strong>
+                        <strong style={{ fontSize: 13.5, fontWeight: 700 }}>{team.name}</strong>
                       </div>
                       <div style={{ fontSize: 12, color: "var(--text-3)", marginTop: 4 }}>
-                        {team.lead ? `負責：${team.lead}` : "尚未指派組長"}
+                        {team.lead || "待指派"}
                       </div>
                       <div className="progress-track" style={{ height: 4, marginTop: 8 }}>
                         <div className="progress-fill" style={{ width: `${tp.percent}%` }} />
                       </div>
-                      <div className="tabular" style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 4 }}>
-                        組內待辦 {tp.done}/{tp.total} 完成
+                      <div className="tabular" style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 4, fontWeight: 500 }}>
+                        {tp.done}/{tp.total} 完成
                       </div>
                     </td>
 
@@ -803,6 +1013,8 @@ export default function ScheduleView({
                       const cell = cellMap.get(`${week.id}:${team.id}`);
                       const prevWeek = wIdx > 0 ? visibleWeeks[wIdx - 1] : null;
                       const prevCell = prevWeek ? cellMap.get(`${prevWeek.id}:${team.id}`) : undefined;
+                      const nextWeek = visibleWeeks[wIdx + 1];
+                      const isMonthEnd = Boolean(nextWeek && nextWeek.monthLabel !== week.monthLabel);
 
                       const curFocus = (cell?.weeklyFocus ?? "").trim();
                       const prevFocus = (prevCell?.weeklyFocus ?? "").trim();
@@ -818,7 +1030,7 @@ export default function ScheduleView({
                       return (
                         <td
                           key={`${week.id}:${team.id}`}
-                          className={`matrix-cell ${week.phase === "post" ? "is-post" : ""}`}
+                          className={`matrix-cell ${week.phase === "post" ? "is-post" : ""} ${week.phase === "event" ? "is-event-week" : ""} ${isMonthEnd ? "is-month-end" : ""} ${isEmptyBody ? "is-empty" : ""}`}
                           onClick={() =>
                             setEditingCell({
                               week,
@@ -829,19 +1041,7 @@ export default function ScheduleView({
                             })
                           }
                         >
-                          {cellTodos.length > 0 && (
-                            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 2 }}>
-                              <span className="tabular" style={{ fontSize: 11, color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>
-                                待辦 {cellTodos.filter((t) => t.done).length}/{cellTodos.length}
-                              </span>
-                            </div>
-                          )}
-
-                          {showFocus && (
-                            <div className="cell-focus" style={{ marginTop: 2 }}>
-                              {curFocus}
-                            </div>
-                          )}
+                          {showFocus && <div className="cell-focus">{curFocus}</div>}
 
                           {cellTodos.length > 0 && (
                             <ul className="cell-todo-list">
@@ -869,12 +1069,10 @@ export default function ScheduleView({
                             </ul>
                           )}
 
-                          {showCross && <div className="cell-cross">跨部：{curCross}</div>}
+                          {showCross && <div className="cell-cross">↔ {curCross}</div>}
 
                           {isEmptyBody && (
-                            <div style={{ fontSize: 12, color: "var(--text-4)", paddingTop: 2 }}>
-                              {curFocus ? "↳ 延續上週重點" : "＋ 點擊補充重點或待辦"}
-                            </div>
+                            <div className="cell-hover-hint">{curFocus ? "↳ 延續" : "＋ 新增"}</div>
                           )}
                         </td>
                       );
@@ -1194,7 +1392,7 @@ export default function ScheduleView({
                           {item.label
                             .replace("倒數 ", "W-")
                             .replace(" 周", "")
-                            .replace(/暫定?活動當周/, "D-Day")
+                            .replace(/(?:暫定)?活動當周/, "D-Day")
                             .replace("活動後 ", "W+")}
                         </span>
                       </div>
@@ -1278,16 +1476,21 @@ export default function ScheduleView({
         </Dialog.Portal>
       </Dialog.Root>
 
-      {/* ── Dialog 4: Google Sheets · Google Slides · Team Sharing Studio ── */}
+      {/* ── Dialog 4: Google Sheets · Editorial Presentation Deck · Team Sharing Studio ── */}
       <Dialog.Root open={shareOpen} onOpenChange={setShareOpen}>
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
-          <Dialog.Content className="dialog-content is-wide">
-            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <Dialog.Content className="dialog-content is-export-studio">
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <Dialog.Title style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>
-                  Google 試算表 · 簡報與團隊協作分享
-                </Dialog.Title>
+                <div>
+                  <Dialog.Title style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>
+                    試算表匯出 · 專案簡報與分享
+                  </Dialog.Title>
+                  <Dialog.Description style={{ margin: "2px 0 0", fontSize: 12.5, color: "var(--text-3)" }}>
+                    自動帶入黑框匡線、粗體階層、色塊與合併儲存格；並可投影或匯出 16:9 簡報
+                  </Dialog.Description>
+                </div>
                 <Dialog.Close asChild>
                   <button type="button" className="icon-btn" aria-label="關閉">
                     <X size={15} />
@@ -1295,14 +1498,14 @@ export default function ScheduleView({
                 </Dialog.Close>
               </div>
 
-              <div style={{ display: "flex", gap: 6, borderBottom: "1px solid var(--line)", paddingBottom: 10 }}>
+              <div style={{ display: "flex", gap: 6, borderBottom: "1px solid var(--line)", paddingBottom: 10, flexWrap: "wrap" }}>
                 <button
                   type="button"
                   className={`btn btn-sm ${shareTab === "sheets" ? "btn-primary" : ""}`}
                   onClick={() => setShareTab("sheets")}
                 >
                   <FileSpreadsheet size={13} />
-                  <span>Google 試算表連結與匯出</span>
+                  <span>Google 試算表匯出</span>
                 </button>
                 <button
                   type="button"
@@ -1310,7 +1513,7 @@ export default function ScheduleView({
                   onClick={() => setShareTab("slides")}
                 >
                   <Presentation size={13} />
-                  <span>Google 簡報與投影片檢視</span>
+                  <span>專案簡報（{deckSlides.length} 頁）</span>
                 </button>
                 <button
                   type="button"
@@ -1318,204 +1521,209 @@ export default function ScheduleView({
                   onClick={() => setShareTab("team")}
                 >
                   <Share2 size={13} />
-                  <span>單檔網頁與群組週報</span>
+                  <span>單檔網頁與週報</span>
                 </button>
               </div>
 
               {shareTab === "sheets" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 10 }}>
-                    <button
-                      type="button"
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(215px, 1fr))", gap: 9 }}>
+                    <a
                       className="btn btn-primary"
-                      onClick={() => copyText(matrixToTsv(buildGoogleSheetMatrix(snapshot)), "試算表矩陣（可直接 ⌘V 貼入 Google 試算表 A1）")}
+                      href={`/api/campaigns/${snapshot.campaign.id}/export.xlsx`}
+                      download
                     >
-                      <Copy size={14} />
-                      <span>複製矩陣直貼 Google 試算表</span>
-                    </button>
-                    <a className="btn" href={`/api/campaigns/${snapshot.campaign.id}/export.csv`} download>
                       <Download size={14} />
-                      <span>下載 .csv 試算表檔</span>
+                      <span>下載完整格式 .xlsx（推薦）</span>
                     </a>
                     <button
                       type="button"
                       className="btn"
-                      onClick={() => copyText(buildAppsScriptSyncCode(snapshot), " Google Apps Script 自動寫入腳本")}
+                      onClick={copyFormattedSheet}
+                    >
+                      <Copy size={14} />
+                      <span>複製帶格式表格（直貼 ⌘V）</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() =>
+                        copyText(
+                          buildFormattedAppsScriptCode(snapshot),
+                          " Google Apps Script 自動排版碼（含黑框匡線、粗體、色塊與合併儲存格）",
+                        )
+                      }
                     >
                       <FileSpreadsheet size={14} />
-                      <span>複製 Apps Script 自動同步碼</span>
+                      <span>複製 Apps Script 排版碼</span>
                     </button>
+                    <a className="btn" href={`/api/campaigns/${snapshot.campaign.id}/export.csv`} download>
+                      <Download size={14} />
+                      <span>下載純文字 .csv</span>
+                    </a>
                   </div>
 
-                  <div>
-                    <label className="field-label">連結團隊共用的 Google 試算表網址（支援從公開試算表直接匯入結構）</label>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <input
-                        className="input"
-                        value={sheetUrlInput}
-                        onChange={(e) => setSheetUrlInput(e.target.value)}
-                        placeholder="https://docs.google.com/spreadsheets/d/..."
-                      />
-                      <button type="button" className="btn" onClick={handleSaveLinks}>
-                        綁定網址
-                      </button>
-                      <button type="button" className="btn" disabled={importBusy} onClick={handleImportSheet}>
-                        {importBusy ? "匯入中…" : "從此試算表匯入"}
-                      </button>
+                  <div className="sheet-tip-banner">
+                    <strong>最省事做法：</strong>下載 <code>.xlsx</code> 到 Google 試算表點「檔案 → 匯入 → 上傳」，<strong>黑框匡線、粗體、色塊、欄寬、凍結窗格與合併儲存格</strong>一次到位；在空白表直接按 <code>⌘V</code> 也會帶入框線、色塊與合併。
+                  </div>
+
+                  <StyledSheetMiniPreview snapshot={snapshot} />
+
+                  <div className="sheet-import-grid">
+                    <div>
+                      <label className="field-label">連結團隊共用 Google 試算表網址（可從公開試算表直接匯入）</label>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <input
+                          className="input"
+                          value={sheetUrlInput}
+                          onChange={(e) => setSheetUrlInput(e.target.value)}
+                          placeholder="https://docs.google.com/spreadsheets/d/..."
+                        />
+                        <button type="button" className="btn btn-sm" onClick={handleSaveLinks}>
+                          綁定
+                        </button>
+                        <button type="button" className="btn btn-sm" disabled={importBusy} onClick={handleImportSheet}>
+                          {importBusy ? "匯入中…" : "匯入"}
+                        </button>
+                      </div>
                     </div>
-                  </div>
-
-                  <div>
-                    <label className="field-label">或貼上 Google 試算表匯出的 CSV 文字直接建立週次與組別</label>
-                    <textarea
-                      className="textarea"
-                      rows={3}
-                      value={csvImportText}
-                      onChange={(e) => setCsvImportText(e.target.value)}
-                      placeholder="貼上包含「月、日期、倒數週數、各組完成度／本週進度／待辦事項」的 CSV…"
-                    />
+                    <div>
+                      <label className="field-label">或貼上試算表 CSV 文字快速匯入</label>
+                      {/* textarea, not input: an <input> strips the CSV's line breaks */}
+                      <textarea
+                        className="textarea"
+                        rows={4}
+                        value={csvImportText}
+                        onChange={(e) => setCsvImportText(e.target.value)}
+                        placeholder="貼上 CSV 後點擊左側「匯入」…"
+                      />
+                    </div>
                   </div>
                 </div>
               )}
 
-              {shareTab === "slides" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                  <div className="slide-stage">
-                    {slideIdx === 0 && (
-                      <>
-                        <div>
-                          <span className="pill pill-campaign">SLIDE 01 · 專案總覽</span>
-                          <h3 style={{ fontSize: 24, margin: "12px 0 6px" }}>{snapshot.campaign.name}</h3>
-                          <p style={{ margin: 0, color: "var(--text-2)", fontSize: 14.5 }}>
-                            {snapshot.campaign.mainGoal || snapshot.campaign.subtitle}
-                          </p>
-                        </div>
-                        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
-                          <div className="kpi-card">
-                            <span style={{ fontSize: 12, color: "var(--text-3)" }}>
-                              {snapshot.campaign.dateTentative ? "預計舉辦時間" : "正式活動日"}
-                            </span>
-                            <strong className="tabular" style={{ fontSize: snapshot.campaign.dateTentative ? 15 : 18 }}>
-                              {formatCampaignDateLabel(snapshot.campaign)}
-                            </strong>
-                          </div>
-                          <div className="kpi-card">
-                            <span style={{ fontSize: 12, color: "var(--text-3)" }}>整體完成度</span>
-                            <strong className="tabular" style={{ fontSize: 18 }}>{metrics.overallPercent}%</strong>
-                          </div>
-                          <div className="kpi-card">
-                            <span style={{ fontSize: 12, color: "var(--text-3)" }}>排程節奏</span>
-                            <strong style={{ fontSize: 18 }}>{currentPacingMeta.label}</strong>
-                          </div>
-                        </div>
-                      </>
-                    )}
+              {shareTab === "slides" && deckSlides[safeSlideIdx] && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div className="deck-studio-bar">
+                    <div className="deck-pill-strip" role="tablist" aria-label="簡報頁次切換">
+                      {deckSlides.map((sl, idx) => (
+                        <button
+                          key={`${sl.kind}-${idx}`}
+                          type="button"
+                          role="tab"
+                          aria-selected={safeSlideIdx === idx}
+                          className={`month-chip ${safeSlideIdx === idx ? "is-active" : ""}`}
+                          onClick={() => setSlideIdx(idx)}
+                        >
+                          <span className="month-chip-count">{sl.indexLabel}</span>
+                          <span>{sl.tabLabel}</span>
+                        </button>
+                      ))}
+                    </div>
 
-                    {slideIdx === 1 && (
-                      <>
-                        <div>
-                          <span className="pill pill-warn">SLIDE 02 · 重大里程碑與撞期避開雷達</span>
-                          <h3 style={{ fontSize: 20, margin: "10px 0 12px" }}>關鍵時間點與外部撞期活動</h3>
-                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                            {orderedWeeks
-                              .filter((w) => w.majorEvents.length > 0)
-                              .slice(0, 5)
-                              .map((w) => (
-                                <div
-                                  key={w.id}
-                                  style={{
-                                    display: "flex",
-                                    justifyContent: "space-between",
-                                    padding: "8px 12px",
-                                    background: "var(--panel)",
-                                    borderRadius: "var(--radius-sm)",
-                                    border: "1px solid var(--line)",
-                                  }}
-                                >
-                                  <strong>
-                                    {w.countdownLabel}（{w.dateRange}）
-                                  </strong>
-                                  <span>
-                                    {w.majorEvents.map((e) => `${e.kind === "conflict" ? "⚠️" : "📌"} ${e.title}`).join(" · ")}
-                                  </span>
-                                </div>
-                              ))}
-                          </div>
-                        </div>
-                        <div style={{ fontSize: 12.5, color: "var(--text-3)" }}>
-                          BELL Campaign 時程簡報檢視 · 可直接投影於籌備週會
-                        </div>
-                      </>
-                    )}
-
-                    {slideIdx === 2 && (
-                      <>
-                        <div>
-                          <span className="pill pill-ok">SLIDE 03 · 各大組別進度快報</span>
-                          <h3 style={{ fontSize: 20, margin: "10px 0 12px" }}>各組完成度與優先推進事項</h3>
-                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                            {orderedTeams.map((t) => {
-                              const tp = metrics.teamProgress[t.id];
-                              const nextTodo = snapshot.todos.find((td) => td.teamId === t.id && !td.done);
-                              return (
-                                <div key={t.id} className="kpi-card" style={{ padding: "10px 12px" }}>
-                                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                                    <strong>{t.name}</strong>
-                                    <span className="tabular">{tp?.percent ?? 0}%</span>
-                                  </div>
-                                  <div className="progress-track" style={{ height: 5 }}>
-                                    <div className="progress-fill" style={{ width: `${tp?.percent ?? 0}%` }} />
-                                  </div>
-                                  <div style={{ fontSize: 12, color: "var(--text-2)" }}>
-                                    下一步：{nextTodo ? nextTodo.title : "本階段待辦已完成"}
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                        <div style={{ fontSize: 12.5, color: "var(--text-3)" }}>總待辦完成：{metrics.completedTodos}/{metrics.totalTodos}</div>
-                      </>
-                    )}
-                  </div>
-
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                      <div className="segmented-inline" role="radiogroup" aria-label="簡報主題風格">
+                        <button
+                          type="button"
+                          className={`seg-btn ${deckTheme === "light" ? "is-active" : ""}`}
+                          onClick={() => setDeckTheme("light")}
+                        >
+                          紙感淺色
+                        </button>
+                        <button
+                          type="button"
+                          className={`seg-btn ${deckTheme === "dark" ? "is-active" : ""}`}
+                          onClick={() => setDeckTheme("dark")}
+                        >
+                          劇場深色
+                        </button>
+                      </div>
                       <button
                         type="button"
                         className="btn btn-sm"
-                        onClick={() => setSlideIdx((i) => (i + 2) % 3)}
+                        onClick={() => {
+                          setShareOpen(false);
+                          setDeckFullscreen(true);
+                        }}
+                      >
+                        <Maximize2 size={13} />
+                        <span>全螢幕投影</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="dk-root" data-deck-theme={deckTheme}>
+                    <ScaledDeckStage>
+                      <DeckSlideView
+                        slide={deckSlides[safeSlideIdx]}
+                        campaignName={snapshot.campaign.name}
+                        totalSlides={deckSlides.length}
+                      />
+                    </ScaledDeckStage>
+                  </div>
+
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => setSlideIdx((i) => (i - 1 + deckSlides.length) % deckSlides.length)}
                       >
                         <ChevronLeft size={14} />
-                        <span>上一張</span>
+                        <span>上一頁</span>
                       </button>
-                      <span className="tabular" style={{ fontSize: 13, color: "var(--text-2)" }}>
-                        {slideIdx + 1} / 3
+                      <span className="tabular" style={{ fontSize: 12.5, color: "var(--text-2)", padding: "0 4px" }}>
+                        {safeSlideIdx + 1} / {deckSlides.length}
                       </span>
                       <button
                         type="button"
                         className="btn btn-sm"
-                        onClick={() => setSlideIdx((i) => (i + 1) % 3)}
+                        onClick={() => setSlideIdx((i) => (i + 1) % deckSlides.length)}
                       >
-                        <span>下一張</span>
+                        <span>下一頁</span>
                         <ChevronRight size={14} />
+                      </button>
+
+                      <button type="button" className="btn btn-primary btn-sm" onClick={triggerPrintDeck}>
+                        <Printer size={13} />
+                        <span>匯出 16:9 PDF 簡報</span>
+                      </button>
+                      <a
+                        className="btn btn-sm"
+                        href={`/api/campaigns/${snapshot.campaign.id}/export-deck.html?theme=${deckTheme}`}
+                        download
+                      >
+                        <Download size={13} />
+                        <span>下載互動簡報 (.html)</span>
+                      </a>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() =>
+                          copyText(
+                            buildGoogleSlidesAppsScript(snapshot),
+                            " Google 簡報 (SlidesApp) 自動生成腳本",
+                          )
+                        }
+                      >
+                        <Copy size={13} />
+                        <span>複製 Google 簡報生成碼</span>
                       </button>
                     </div>
 
-                    <div style={{ display: "flex", gap: 8, flex: 1, justifyContent: "flex-end", minWidth: 260 }}>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                       <input
                         className="input"
-                        style={{ maxWidth: 280, height: 30 }}
+                        style={{ width: 220, height: 28, fontSize: 12 }}
                         value={slidesUrlInput}
                         onChange={(e) => setSlidesUrlInput(e.target.value)}
-                        placeholder="綁定 Google 簡報網址 https://docs.google.com/presentation/..."
+                        placeholder="綁定 Google 簡報網址…"
                       />
                       <button type="button" className="btn btn-sm" onClick={handleSaveLinks}>
-                        儲存連結
+                        綁定
                       </button>
                       {snapshot.campaign.slidesUrl && (
-                        <a href={snapshot.campaign.slidesUrl} target="_blank" rel="noreferrer" className="btn btn-primary btn-sm">
-                          <span>開啟簡報</span>
+                        <a href={snapshot.campaign.slidesUrl} target="_blank" rel="noreferrer" className="btn btn-sm">
                           <ExternalLink size={12} />
                         </a>
                       )}
@@ -1612,16 +1820,20 @@ export default function ScheduleView({
                   className="btn btn-primary"
                   onClick={async () => {
                     if (!newTeamName.trim()) return;
-                    const next = await apiWrite<CampaignSnapshot>(
-                      `/api/campaigns/${snapshot.campaign.id}/teams`,
-                      "POST",
-                      { name: newTeamName.trim(), lead: newTeamLead.trim(), color: newTeamColor },
-                    );
-                    onSnapshot(next);
-                    setNewTeamName("");
-                    setNewTeamLead("");
-                    setAddTeamOpen(false);
-                    notify("已新增組別");
+                    try {
+                      const next = await apiWrite<CampaignSnapshot>(
+                        `/api/campaigns/${snapshot.campaign.id}/teams`,
+                        "POST",
+                        { name: newTeamName.trim(), lead: newTeamLead.trim(), color: newTeamColor },
+                      );
+                      onSnapshot(next);
+                      setNewTeamName("");
+                      setNewTeamLead("");
+                      setAddTeamOpen(false);
+                      notify("已新增組別");
+                    } catch (err) {
+                      notify(err instanceof Error ? err.message : "新增組別失敗");
+                    }
                   }}
                 >
                   <Plus size={14} />
@@ -1678,20 +1890,24 @@ export default function ScheduleView({
                   className="btn btn-primary"
                   onClick={async () => {
                     if (!newWeekRange.trim() || !newWeekCountdown.trim()) return;
-                    const next = await apiWrite<CampaignSnapshot>(
-                      `/api/campaigns/${snapshot.campaign.id}/weeks`,
-                      "POST",
-                      {
-                        monthLabel: newWeekMonth.trim() || "當月",
-                        dateRange: newWeekRange.trim(),
-                        countdownLabel: newWeekCountdown.trim(),
-                        phase: newWeekPhase,
-                      },
-                    );
-                    onSnapshot(next);
-                    setNewWeekRange("");
-                    setAddWeekOpen(false);
-                    notify("已新增週次欄位");
+                    try {
+                      const next = await apiWrite<CampaignSnapshot>(
+                        `/api/campaigns/${snapshot.campaign.id}/weeks`,
+                        "POST",
+                        {
+                          monthLabel: newWeekMonth.trim() || "當月",
+                          dateRange: newWeekRange.trim(),
+                          countdownLabel: newWeekCountdown.trim(),
+                          phase: newWeekPhase,
+                        },
+                      );
+                      onSnapshot(next);
+                      setNewWeekRange("");
+                      setAddWeekOpen(false);
+                      notify("已新增週次欄位");
+                    } catch (err) {
+                      notify(err instanceof Error ? err.message : "新增週次失敗");
+                    }
                   }}
                 >
                   <Plus size={14} />
@@ -1840,6 +2056,76 @@ export default function ScheduleView({
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
+      {/* ── Fullscreen Presentation Projection Stage ── */}
+      {deckFullscreen && deckSlides[safeSlideIdx] && (
+        <div className="deck-fullscreen-overlay" data-bg={deckTheme}>
+          <div className="deck-fullscreen-bar">
+            <div className="deck-pill-strip">
+              {deckSlides.map((sl, idx) => (
+                <button
+                  key={`fs-${sl.kind}-${idx}`}
+                  type="button"
+                  className={`month-chip ${safeSlideIdx === idx ? "is-active" : ""}`}
+                  onClick={() => setSlideIdx(idx)}
+                >
+                  <span className="month-chip-count">{sl.indexLabel}</span>
+                  <span>{sl.tabLabel}</span>
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => setDeckTheme((t) => (t === "light" ? "dark" : "light"))}
+              >
+                <span>{deckTheme === "light" ? "切換深色劇場" : "切換紙感淺色"}</span>
+              </button>
+              <button type="button" className="btn btn-sm" onClick={triggerPrintDeck}>
+                <Printer size={13} />
+                <span>存為 PDF</span>
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                onClick={() => {
+                  setDeckFullscreen(false);
+                  setShareOpen(true);
+                }}
+              >
+                <Minimize2 size={13} />
+                <span>結束投影 (Esc)</span>
+              </button>
+            </div>
+          </div>
+          <div className="deck-fullscreen-canvas dk-root" data-deck-theme={deckTheme}>
+            <ScaledDeckStage fitViewport>
+              <DeckSlideView
+                slide={deckSlides[safeSlideIdx]}
+                campaignName={snapshot.campaign.name}
+                totalSlides={deckSlides.length}
+              />
+            </ScaledDeckStage>
+          </div>
+        </div>
+      )}
+
+      {/* ── 16:9 Print-to-PDF Deck Container (portaled outside .app-shell so @media print displays it) ── */}
+      {printingDeck &&
+        createPortal(
+          <div className="bell-print-deck dk-root" data-deck-theme={deckTheme}>
+            {deckSlides.map((sl, idx) => (
+              <div key={`print-${idx}`} className="bell-print-page">
+                <DeckSlideView
+                  slide={sl}
+                  campaignName={snapshot.campaign.name}
+                  totalSlides={deckSlides.length}
+                />
+              </div>
+            ))}
+          </div>,
+          document.body,
+        )}
     </>
   );
 }

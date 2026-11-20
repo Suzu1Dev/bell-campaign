@@ -426,6 +426,7 @@ export function parseGoogleSheetCsv(csvText: string): ParsedGoogleSheetCampaign 
   }
 
   let runningMonth = "";
+  let runningStage: CellStage = "待排";
   const weeks = weekCols.map((col, idx) => {
     const rawMonth = monthRowIdx >= 0 ? (grid[monthRowIdx]?.[col] ?? "").trim() : "";
     if (rawMonth) runningMonth = rawMonth;
@@ -466,7 +467,8 @@ export function parseGoogleSheetCsv(csvText: string): ParsedGoogleSheetCampaign 
 
     const memo = memoRowIdx >= 0 ? (grid[memoRowIdx]?.[col] ?? "").trim() : "";
     const rawOverall = overallRowIdx >= 0 ? (grid[overallRowIdx]?.[col] ?? "").trim() : "";
-    const stage: CellStage = rawOverall ? normalizeStage(rawOverall) : "待排";
+    if (rawOverall) runningStage = normalizeStage(rawOverall);
+    const stage: CellStage = overallRowIdx >= 0 ? runningStage : "待排";
     let progressOverride: number | null = null;
     if (rawOverall && stage === "待排") {
       const m = /(\d{1,3})\s*%/.exec(rawOverall);
@@ -492,7 +494,7 @@ export function parseGoogleSheetCsv(csvText: string): ParsedGoogleSheetCampaign 
 
   for (let r = headerEnd; r < grid.length; r++) {
     const row = grid[r];
-    const teamCol = (row[0] ?? "").trim();
+    const teamCol = (row[0] ?? "").replace(/\s*\(\d+\s*\/\s*\d+\)\s*$/, "").trim();
     const subCol = (row[1] ?? "").trim();
 
     if (teamCol && !["倒數週數", "主要排程", "備註", "整體進度", "專案進度"].includes(teamCol)) {
@@ -579,9 +581,7 @@ export function buildGoogleSheetMatrix(snapshot: CampaignSnapshot): string[][] {
   const majorRow = [
     "主要排程／撞期",
     "",
-    ...orderedWeeks.map((w) =>
-      w.majorEvents.map((e) => (e.kind === "conflict" ? `[撞期避開] ${e.title}` : e.title)).join("\n"),
-    ),
+    ...orderedWeeks.map((w) => w.majorEvents.map((e) => e.title).join("\n")),
   ];
   const memoRow = ["備註", "", ...orderedWeeks.map((w) => w.memo)];
 
@@ -599,7 +599,7 @@ export function buildGoogleSheetMatrix(snapshot: CampaignSnapshot): string[][] {
       ...orderedWeeks.map((w) =>
         snapshot.todos
           .filter((t) => t.teamId === team.id && t.weekId === w.id)
-          .map((t) => `${t.done ? "✓" : "☐"} ${t.title}`)
+          .map((t) => (t.done ? `✓ ${t.title}` : t.title))
           .join("\n"),
       ),
     ]);
@@ -995,33 +995,20 @@ export function buildPacingSchedulePreview(
       const stage = weekStageMap.get(week.id) ?? "進度50%";
 
       const weekTeamTodos = todos.filter((t) => t.teamId === team.id && t.weekId === week.id);
-      const weekMonths = parseMonthNumbers(week.monthLabel);
-      const monthGoal = input.monthlyGoals.find((g) => {
-        const gMonths = parseMonthNumbers(g.month);
-        return (
-          (gMonths.length > 0 && weekMonths.some((m) => gMonths.includes(m))) ||
-          week.monthLabel.includes(g.month) ||
-          g.month.includes(week.monthLabel)
-        );
-      });
-      const trimClause = (s: string, maxLen = 22): string => {
-        let clause = s.split(/[；;。（(]/)[0]?.trim() || s.trim();
-        if (clause.length > maxLen && clause.includes("，")) {
-          const head = clause.split("，")[0]?.trim() ?? "";
-          if (head.length >= 6) clause = head;
-        }
+      const trimClause = (s: string, maxLen = 12): string => {
+        const stripped = s
+          .replace(/^\d+\s*月(?:初|中|底|下旬|上旬)?\s*/u, "")
+          .replace(/^T-\d+W\s*/i, "")
+          .trim();
+        let clause = stripped.split(/[；;。（(、，]/)[0]?.trim() || stripped;
         return clause.length <= maxLen ? clause : `${clause.slice(0, maxLen - 1)}…`;
       };
       const focus =
         weekTeamTodos.length > 0
-          ? weekTeamTodos.map((t) => trimClause(t.title, 20)).slice(0, 2).join(" · ")
-          : inBuffer
-            ? stage === "RC"
-              ? "總彩排驗收與最終確認"
-              : "跨組流程除錯與備案檢核"
-            : monthGoal?.goal
-              ? trimClause(monthGoal.goal, 22)
-              : "依排程推進組內交付";
+          ? trimClause(weekTeamTodos[0].title, 12)
+          : inBuffer && stage === "RC"
+            ? "總彩排 & 驗收"
+            : "";
 
       cells.push({
         weekId: week.id,
@@ -1036,7 +1023,7 @@ export function buildPacingSchedulePreview(
         weekId: eventWeek.id,
         teamId: team.id,
         stage: "活動",
-        weeklyFocus: "活動當日執行與現場應變",
+        weeklyFocus: "活動當日",
       });
     }
     postWeeks.forEach((pw, pIdx) => {
@@ -1044,7 +1031,7 @@ export function buildPacingSchedulePreview(
         weekId: pw.id,
         teamId: team.id,
         stage: "復盤",
-        weeklyFocus: pIdx === 0 ? "成果歸檔、感謝信與核銷整理" : "專案復盤檢討與文件交接",
+        weeklyFocus: pIdx === 0 ? "結案 & 證書" : "復盤 & 核銷",
       });
     });
   }
