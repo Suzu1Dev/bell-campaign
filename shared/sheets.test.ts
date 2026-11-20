@@ -296,6 +296,7 @@ test("renderSingleSlideHtml matrix wraps .dk-mx-team inside <td> and Markdown pa
   assert.equal(isSafeMarkdownUrl("#section"), true);
   assert.equal(isSafeMarkdownUrl("//evil.com/phish"), false);
   assert.equal(isSafeMarkdownUrl("///evil.com"), false);
+  assert.equal(isSafeMarkdownUrl("/\\evil.com/phish"), false);
   assert.equal(isSafeMarkdownUrl("javascript:alert(1)"), false);
   assert.equal(isSafeMarkdownUrl("data:text/html,<script>alert(1)</script>"), false);
 
@@ -357,6 +358,8 @@ test("Regression guards: surrogate-safe sheetName, empty-weeks pacing, and CRLF 
     assert.deepEqual(emptyWeekPreview.cells, []);
 
     assert.equal(inferUploadMimeType("notes.txt", "text/plain\r\nX-Injected: 1"), "text/plain");
+    assert.equal(inferUploadMimeType("notes.txt", "text/plain\r\n;charset=utf-8"), "text/plain");
+    assert.equal(inferUploadMimeType("notes.txt", "text/plain; charset=中文"), "text/plain");
     assert.equal(inferUploadMimeType("unknown.bin", "bad\nmime"), "application/octet-stream");
     store.close();
   } finally {

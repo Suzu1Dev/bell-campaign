@@ -742,8 +742,8 @@ ${JSON.stringify({
 
   // 0a. Team Split / Independence / Creation / Rename / Lead update
   const splitMatch =
-    /(?:把|將)[「『\s]*([^\s，,。！？「」『』]{1,12}組)[」』\s]*(?:獨立(?:出來|一組|成組)?|拆出來|分出來|獨立)/.exec(msg) ||
-    /([^\s把將，,。！？「」『』][^\s，,。！？「」『』]{0,11}組)(?:我覺得)?(?:可以|應該|想要|幫我|直接|要)?(?:獨立(?:出來|一組|成組)?|拆出來|分出來|獨立)/.exec(msg);
+    /(?:把|將)[「『\s]*([^\s，,。！？「」『』]{1,12}?組)[」』\s]*(?:從[「『\s]*([^\s，,。！？「」『』]{1,20})[」』\s]*)?(?:獨立(?:出來|一組|成組)?|拆出來|分出來|獨立)/.exec(msg) ||
+    /([^\s把將從，,。！？「」『』][^\s從，,。！？「」『』]{0,11}?組)(?:我覺得)?(?:可以|應該|想要|幫我|直接|要)?(?:從[「『\s]*([^\s，,。！？「」『』]{1,20})[」』\s]*)?(?:獨立(?:出來|一組|成組)?|拆出來|分出來|獨立)/.exec(msg);
   const isCompoundAudit = !splitMatch && /(?:複合組別|拆開獨立|檢視.*組別)/.test(msg);
   const createTeamMatch =
     /(?:新增|建立|多加)(?:一個)?組別[「『:：\s]*([^\s，,。！？「」『』]{2,16})/.exec(msg) ||
@@ -756,11 +756,14 @@ ${JSON.stringify({
 
   if (splitMatch) {
     const newTeamName = splitMatch[1].trim();
+    const explicitOrigin = splitMatch[2]?.trim();
     const stem = newTeamName.replace(/組$/, "").trim();
     const escapedStem = escapeRegExp(stem);
-    const fromTeam = stem
-      ? snapshot.teams.find((t) => t.name !== newTeamName && t.name.includes(stem))
-      : undefined;
+    const fromTeam =
+      (explicitOrigin
+        ? snapshot.teams.find((t) => t.name !== newTeamName && (t.name === explicitOrigin || t.name.includes(explicitOrigin)))
+        : undefined) ??
+      (stem ? snapshot.teams.find((t) => t.name !== newTeamName && t.name.includes(stem)) : undefined);
     if (fromTeam) {
       const renameFromTo = cleanSplitOriginTeamName(fromTeam.name, stem);
       const kwPattern = stem === "轉播" ? "轉播|直播|導播|OBS|賽評|16強|8強" : escapedStem;
@@ -903,7 +906,7 @@ ${JSON.stringify({
   const isNewProjectBlank = !snapshot.campaign.brief.trim() && snapshot.todos.length === 0;
   if (
     /想辦|打算辦|專案主要|活動性質|定位|受眾|規模|黑客松|工作坊|市集|展覽|音樂節|論壇|研討會|靈感|借鏡|相似活動/.test(msg) ||
-    (isNewProjectBlank && msg.length >= 10 && !/緊湊|手冊|招工|會議/.test(msg))
+    (isNewProjectBlank && msg.length >= 10 && !/緊湊|手冊|招工|會議|刪除|移除|清空|取消/.test(msg))
   ) {
     const cleanBrief = msg.replace(/^(我們|我)?(想辦|打算辦|規劃|專案主要是)[:：\s]*/, "").trim();
     proposals.push({

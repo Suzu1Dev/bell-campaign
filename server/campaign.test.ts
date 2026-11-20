@@ -732,19 +732,21 @@ test("Inline PDF headers, MIME inference on .md upload, Bot QUICK_PROMPTS[0], sp
     assert.ok(wsXml.includes("Valid🎉"));
     assert.ok(!wsXml.includes("\uFFFE") && !wsXml.includes("\uFFFF") && !wsXml.includes("\uFFFD"));
 
-    // 8. Regression: Upload CRLF mimeType rejected (400) & whitespace-only doc contentMd rejected (400)
-    const badMimeUpload = await fetch(`${baseUrl}/api/campaigns/${cid}/files/upload`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        title: "CRLF MIME",
-        category: "handbook",
-        fileName: "test.txt",
-        mimeType: "text/plain\r\nX-Injected: 1",
-        dataBase64: Buffer.from("hello", "utf8").toString("base64"),
-      }),
-    });
-    assert.equal(badMimeUpload.status, 400);
+    // 8. Regression: Upload CRLF/non-ASCII mimeType rejected (400) & whitespace-only doc contentMd rejected (400)
+    for (const badMime of ["text/plain\r\nX-Injected: 1", "text/plain\r\n;charset=utf-8", "text/plain; charset=中文"]) {
+      const badMimeUpload = await fetch(`${baseUrl}/api/campaigns/${cid}/files/upload`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Bad MIME",
+          category: "handbook",
+          fileName: "test.txt",
+          mimeType: badMime,
+          dataBase64: Buffer.from("hello", "utf8").toString("base64"),
+        }),
+      });
+      assert.equal(badMimeUpload.status, 400, `Expected 400 for mimeType=${JSON.stringify(badMime)}`);
+    }
 
     const blankDocRes = await fetch(`${baseUrl}/api/campaigns/${cid}/files/doc`, {
       method: "POST",
@@ -788,6 +790,40 @@ test("Inline PDF headers, MIME inference on .md upload, Bot QUICK_PROMPTS[0], sp
     const afterDelBot = (await delBotRes.json()) as CampaignSnapshot;
     assert.equal(afterDelBot.todos.length, todoCountBeforeDel);
     assert.equal(afterDelBot.teams.length, teamCountBeforeDel);
+
+    // 10. Regression: "把轉播組從總召&轉播組獨立出來" splits cleanly & migrates todos; blank-campaign delete does not set brief
+    const originTeam = store.addTeam(cid, { name: "總召&轉播組", lead: "lead", targetHeadcount: 4 });
+    const obsTodo = store.addTodo(cid, {
+      teamId: originTeam.id,
+      weekId: snap.weeks[0].id,
+      title: "OBS 測試",
+      priority: "high",
+    });
+    const fromSplitRes = await fetch(`${baseUrl}/api/campaigns/${cid}/bot/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "把轉播組從總召&轉播組獨立出來" }),
+    });
+    assert.equal(fromSplitRes.status, 200);
+    const afterFromSplit = (await fromSplitRes.json()) as CampaignSnapshot;
+    const splitBroadcastTeam = afterFromSplit.teams.find((t) => t.name === "轉播組");
+    assert.ok(splitBroadcastTeam);
+    assert.ok(!afterFromSplit.teams.some((t) => t.name.includes("從總召")));
+    assert.equal(afterFromSplit.teams.find((t) => t.id === originTeam.id)?.name, "總召組");
+    assert.equal(afterFromSplit.todos.find((t) => t.id === obsTodo.id)?.teamId, splitBroadcastTeam.id);
+
+    const blankSnap: CampaignSnapshot = {
+      ...afterFromSplit,
+      campaign: { ...afterFromSplit.campaign, brief: "", mainGoal: "" },
+      todos: [],
+    };
+    const blankDelReply = await replyCampaignBot(
+      blankSnap,
+      "幫我刪除世界咖啡館組別與所有待辦",
+      afterFromSplit.settings,
+      new AbortController().signal,
+    );
+    assert.equal(blankDelReply.proposals.length, 0);
   });
 });
 
