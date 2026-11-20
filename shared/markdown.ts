@@ -14,7 +14,7 @@ export type MarkdownBlock =
   | { type: "list"; ordered: boolean; items: Array<{ checked: boolean | null; spans: InlineSpan[] }> }
   | { type: "paragraph"; spans: InlineSpan[] };
 
-const SAFE_URL_RE = /^(?:https?:\/\/|\/|#)/i;
+const SAFE_URL_RE = /^(?:https?:\/\/|\/(?!\/)|#)/i;
 
 export function isSafeMarkdownUrl(raw: string): boolean {
   const trimmed = raw.trim();

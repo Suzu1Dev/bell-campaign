@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildAppsScriptSyncCode,
   buildGoogleSheetMatrix,
   buildPacingSchedulePreview,
   buildWeeklyTimelineDefs,
@@ -15,6 +16,7 @@ import {
 } from "./sheets.js";
 import {
   curateComparableEvents,
+  inferUploadMimeType,
   meetingToGoogleDocHtml,
   meetingToHackMd,
   parseMeetingDoc,
@@ -26,7 +28,7 @@ import {
   personalTaskHref,
   prDraftHref,
 } from "./suite.js";
-import { buildSlidesDeckModel, renderSingleSlideHtml } from "./exporters.js";
+import { buildSlidesDeckModel, buildStyledSheetModel, renderSingleSlideHtml } from "./exporters.js";
 import { isSafeMarkdownUrl, parseMarkdownBlocks } from "./markdown.js";
 import { CampaignStore } from "../server/store.js";
 
@@ -292,6 +294,8 @@ test("renderSingleSlideHtml matrix wraps .dk-mx-team inside <td> and Markdown pa
   assert.equal(isSafeMarkdownUrl("http://127.0.0.1:21105/#/schedule"), true);
   assert.equal(isSafeMarkdownUrl("/api/files/1/raw"), true);
   assert.equal(isSafeMarkdownUrl("#section"), true);
+  assert.equal(isSafeMarkdownUrl("//evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("///evil.com"), false);
   assert.equal(isSafeMarkdownUrl("javascript:alert(1)"), false);
   assert.equal(isSafeMarkdownUrl("data:text/html,<script>alert(1)</script>"), false);
 
@@ -326,4 +330,36 @@ echo "hello"
   }
   assert.equal(blocks[4]?.type, "table");
   assert.equal(blocks[5]?.type, "code");
+});
+
+test("Regression guards: surrogate-safe sheetName, empty-weeks pacing, and CRLF MIME fallback", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bell-campaign-reg-"));
+  try {
+    const store = new CampaignStore(join(dir, "campaign.db"), join(dir, "uploads"));
+    const snap = store.getSnapshot();
+    const emojiSnap = {
+      ...snap,
+      campaign: { ...snap.campaign, name: "a".repeat(27) + "🎉" + "suffix" },
+    };
+
+    const sheetModel = buildStyledSheetModel(emojiSnap);
+    assert.equal(sheetModel.sheetName, "a".repeat(27) + "🎉");
+    assert.equal(Buffer.from(sheetModel.sheetName, "utf8").toString("utf8"), sheetModel.sheetName);
+
+    const appsScript = buildAppsScriptSyncCode(emojiSnap);
+    assert.ok(appsScript.includes(JSON.stringify("a".repeat(27) + "🎉")));
+
+    const emptyWeekPreview = buildPacingSchedulePreview(
+      { weeks: [], teams: snap.teams, cells: [], todos: [] },
+      { mainGoal: "", monthlyGoals: [], tasksText: "孤立任務", pacing: "balanced" },
+    );
+    assert.deepEqual(emptyWeekPreview.todos, []);
+    assert.deepEqual(emptyWeekPreview.cells, []);
+
+    assert.equal(inferUploadMimeType("notes.txt", "text/plain\r\nX-Injected: 1"), "text/plain");
+    assert.equal(inferUploadMimeType("unknown.bin", "bad\nmime"), "application/octet-stream");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

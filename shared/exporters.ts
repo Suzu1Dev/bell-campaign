@@ -481,9 +481,9 @@ export function buildStyledSheetModel(snapshot: CampaignSnapshot): StyledSheetMo
 
   return {
     sheetName:
-      snapshot.campaign.name
-        .replace(/[\\/?*[\]:]/g, "-")
+      Array.from(snapshot.campaign.name.replace(/[\\/?*[\]:]/g, "-"))
         .slice(0, 28)
+        .join("")
         .replace(/^'+|'+$/g, "") || "籌備時程規劃",
     colWidthsPx,
     rowHeightsPt,

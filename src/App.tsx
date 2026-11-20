@@ -781,7 +781,7 @@ export default function App() {
               notify={notify}
             />
           ) : (
-            <ScheduleView snapshot={snapshot} onSnapshot={setSnapshot} notify={notify} />
+            <ScheduleView key={snapshot.campaign.id} snapshot={snapshot} onSnapshot={setSnapshot} notify={notify} />
           )}
         </main>
       </div>

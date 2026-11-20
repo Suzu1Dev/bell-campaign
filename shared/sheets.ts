@@ -695,7 +695,7 @@ export function buildAppsScriptSyncCode(snapshot: CampaignSnapshot): string {
  */
 function syncBellCampaign() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheetName = ${JSON.stringify(snapshot.campaign.name.slice(0, 28))};
+  const sheetName = ${JSON.stringify(Array.from(snapshot.campaign.name).slice(0, 28).join(""))};
   let sheet = ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
   sheet.clear();
 
@@ -887,7 +887,7 @@ export function buildPacingSchedulePreview(
   const todos: ProposedNewTodo[] = [];
   const teams = snapshot.teams;
 
-  if (teams.length > 0) {
+  if (teams.length > 0 && slotWeights.length > 0) {
     rawLines.forEach((line, idx) => {
       // 1. Explicit team prefix / name mention wins first; 2. Keyword affinity; 3. Round-robin
       let matchedTeam =

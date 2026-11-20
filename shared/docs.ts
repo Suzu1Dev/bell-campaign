@@ -456,9 +456,11 @@ const EXTENSION_MIME_MAP: Record<string, string> = {
   gif: "image/gif",
 };
 
+export const SAFE_MIME_RE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+(?:\s*;[^\r\n\u0000-\u001f\u007f]*)?$/i;
+
 export function inferUploadMimeType(fileName: string, reportedMimeType?: string): string {
   const cleaned = (reportedMimeType ?? "").trim().toLowerCase();
-  if (cleaned && cleaned !== "application/octet-stream") {
+  if (cleaned && cleaned !== "application/octet-stream" && SAFE_MIME_RE.test(cleaned)) {
     return cleaned;
   }
   const ext = fileName.trim().toLowerCase().split(".").pop() ?? "";

@@ -106,7 +106,11 @@ function colIndexToLetters(colIdx: number): string {
 
 function xmlEscape(raw: string): string {
   return raw
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
+    // Preserve valid surrogate pairs while stripping C0 controls, XML 1.0 noncharacters, and lone surrogates
+    .replace(
+      /[\uD800-\uDBFF][\uDC00-\uDFFF]|[\u0000-\u0008\u000b\u000c\u000e-\u001f\uD800-\uDFFF\uFFFE\uFFFF]/g,
+      (m) => (m.length === 2 ? m : ""),
+    )
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

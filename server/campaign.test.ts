@@ -705,5 +705,171 @@ test("Inline PDF headers, MIME inference on .md upload, Bot QUICK_PROMPTS[0], sp
     assert.ok(!edgeModel.sheetName.endsWith("'"));
     const edgeXlsx = buildCampaignXlsxBuffer(edgeSnap);
     assert.equal(edgeXlsx.readUInt32LE(0), 0x04034b50);
+
+    // 7. Regression: XLSX strips XML 1.0 illegal U+FFFE/U+FFFF/lone surrogates while preserving emoji surrogate pairs
+    const xmlEdgeSnap: CampaignSnapshot = {
+      ...snap,
+      campaign: { ...snap.campaign, name: "a".repeat(27) + "🎉x" },
+      cells: snap.cells.map((c, idx) =>
+        idx === 0 ? { ...c, weeklyFocus: "Valid🎉\uFFFE\uFFFF\uD83C" } : c,
+      ),
+    };
+    const xmlEdgeBuf = buildCampaignXlsxBuffer(xmlEdgeSnap);
+    const xmlEntries = new Map<string, string>();
+    let zOff = 0;
+    while (zOff + 30 <= xmlEdgeBuf.length && xmlEdgeBuf.readUInt32LE(zOff) === 0x04034b50) {
+      const compSize = xmlEdgeBuf.readUInt32LE(zOff + 18);
+      const nameLen = xmlEdgeBuf.readUInt16LE(zOff + 26);
+      const extraLen = xmlEdgeBuf.readUInt16LE(zOff + 28);
+      const entryName = xmlEdgeBuf.subarray(zOff + 30, zOff + 30 + nameLen).toString("utf8");
+      const dataStart = zOff + 30 + nameLen + extraLen;
+      xmlEntries.set(entryName, inflateRawSync(xmlEdgeBuf.subarray(dataStart, dataStart + compSize)).toString("utf8"));
+      zOff = dataStart + compSize;
+    }
+    const wbXml = xmlEntries.get("xl/workbook.xml") ?? "";
+    const wsXml = xmlEntries.get("xl/worksheets/sheet1.xml") ?? "";
+    assert.ok(wbXml.includes("a".repeat(27) + "🎉"));
+    assert.ok(wsXml.includes("Valid🎉"));
+    assert.ok(!wsXml.includes("\uFFFE") && !wsXml.includes("\uFFFF") && !wsXml.includes("\uFFFD"));
+
+    // 8. Regression: Upload CRLF mimeType rejected (400) & whitespace-only doc contentMd rejected (400)
+    const badMimeUpload = await fetch(`${baseUrl}/api/campaigns/${cid}/files/upload`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "CRLF MIME",
+        category: "handbook",
+        fileName: "test.txt",
+        mimeType: "text/plain\r\nX-Injected: 1",
+        dataBase64: Buffer.from("hello", "utf8").toString("base64"),
+      }),
+    });
+    assert.equal(badMimeUpload.status, 400);
+
+    const blankDocRes = await fetch(`${baseUrl}/api/campaigns/${cid}/files/doc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "空白文件", contentMd: "   \n  " }),
+    });
+    assert.equal(blankDocRes.status, 400);
+
+    // 9. Regression: Unquoted "把AI組拆出來" on "C++&AI組" preserves "C++組", and deletion request creates 0 todos
+    const cppAiTeam = store.addTeam(cid, { name: "C++&AI組", lead: "dev", targetHeadcount: 4 });
+    const unquotedSplit = await fetch(`${baseUrl}/api/campaigns/${cid}/bot/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "把AI組拆出來" }),
+    });
+    assert.equal(unquotedSplit.status, 200);
+    const afterUnquoted = (await unquotedSplit.json()) as CampaignSnapshot;
+    assert.ok(afterUnquoted.teams.some((t) => t.name === "AI組"));
+    assert.ok(!afterUnquoted.teams.some((t) => t.name === "把AI組"));
+    assert.equal(afterUnquoted.teams.find((t) => t.id === cppAiTeam.id)?.name, "C++組");
+
+    const designPrTeam = store.addTeam(cid, { name: "Design(v2)+PR組", lead: "pr", targetHeadcount: 4 });
+    const designSplit = await fetch(`${baseUrl}/api/campaigns/${cid}/bot/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "Design(v2)組獨立出來" }),
+    });
+    assert.equal(designSplit.status, 200);
+    const afterDesign = (await designSplit.json()) as CampaignSnapshot;
+    assert.ok(afterDesign.teams.some((t) => t.name === "Design(v2)組"));
+    assert.equal(afterDesign.teams.find((t) => t.id === designPrTeam.id)?.name, "PR組");
+
+    const todoCountBeforeDel = afterDesign.todos.length;
+    const teamCountBeforeDel = afterDesign.teams.length;
+    const delBotRes = await fetch(`${baseUrl}/api/campaigns/${cid}/bot/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "幫我刪除世界咖啡館組別與所有待辦" }),
+    });
+    assert.equal(delBotRes.status, 200);
+    const afterDelBot = (await delBotRes.json()) as CampaignSnapshot;
+    assert.equal(afterDelBot.todos.length, todoCountBeforeDel);
+    assert.equal(afterDelBot.teams.length, teamCountBeforeDel);
   });
+});
+
+test("External AI split_team escapes invalid regex moveKeyword and avoids blind compound fallback", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bell-campaign-ai-split-"));
+  const store = new CampaignStore(join(dir, "campaign.db"), join(dir, "uploads"));
+  let mode: "regex_kw" | "blind_fallback" = "regex_kw";
+  const app = createApp({
+    store,
+    aiRunner: async () =>
+      mode === "regex_kw"
+        ? {
+            content: "已拆分 C++組",
+            proposals: [
+              {
+                kind: "split_team",
+                summary: "拆出 C++組",
+                detail: "移轉 C++ 相關待辦",
+                payload: { fromTeamName: "行銷組", newTeamName: "C++組", moveKeyword: "C++" },
+              },
+            ],
+          }
+        : {
+            content: "已拆分攝影組",
+            proposals: [
+              {
+                kind: "split_team",
+                summary: "新增攝影組",
+                detail: "不應誤改其他複合組別",
+                payload: { newTeamName: "攝影組" },
+              },
+            ],
+          },
+  });
+  const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+    const s = app.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  const { port } = server.address() as AddressInfo;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  try {
+    await fetch(`${baseUrl}/api/settings`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "codex", botAutoApply: true }),
+    });
+    const snap = store.getSnapshot();
+    const cid = snap.campaign.id;
+    const mkt = store.addTeam(cid, { name: "行銷組", targetHeadcount: 4 });
+    const cppTodo = store.addTodo(cid, {
+      teamId: mkt.id,
+      weekId: snap.weeks[0].id,
+      title: "C++ 課程宣傳",
+      priority: "high",
+    });
+
+    const r1 = await fetch(`${baseUrl}/api/campaigns/${cid}/bot/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "拆分 C++組" }),
+    });
+    assert.equal(r1.status, 200);
+    const s1 = (await r1.json()) as CampaignSnapshot;
+    const cppTeam = s1.teams.find((t) => t.name === "C++組");
+    assert.ok(cppTeam);
+    assert.equal(s1.todos.find((t) => t.id === cppTodo.id)?.teamId, cppTeam.id);
+
+    mode = "blind_fallback";
+    const compoundBefore = s1.teams.filter((t) => /[&＆、／/+]/.test(t.name)).map((t) => ({ id: t.id, name: t.name }));
+    const r2 = await fetch(`${baseUrl}/api/campaigns/${cid}/bot/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "新增攝影組" }),
+    });
+    assert.equal(r2.status, 200);
+    const s2 = (await r2.json()) as CampaignSnapshot;
+    assert.ok(s2.teams.some((t) => t.name === "攝影組"));
+    for (const prev of compoundBefore) {
+      assert.equal(s2.teams.find((t) => t.id === prev.id)?.name, prev.name);
+    }
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -24,6 +24,7 @@ import {
   type TeamColor,
 } from "../shared/types.js";
 import {
+  SAFE_MIME_RE,
   detectDocSourceFromUrl,
   meetingToGoogleDocHtml,
   meetingToHackMd,
@@ -49,7 +50,9 @@ import { buildStandalonePresentationHtml } from "../shared/exporters.js";
 import { buildCampaignXlsxBuffer } from "./xlsx.js";
 import {
   buildBuiltinHandbook,
+  cleanSplitOriginTeamName,
   curateInspirationsWithAI,
+  escapeRegExp,
   generateAutoSchedulePreview,
   generateHandbookWithAI,
   replyCampaignBot,
@@ -308,7 +311,7 @@ const uploadFileSchema = z
     category: z.enum(FILE_CATEGORIES),
     teamId: z.string().trim().nullable().optional(),
     fileName: z.string().trim().min(1).max(140),
-    mimeType: z.string().trim().min(1).max(100),
+    mimeType: z.string().trim().min(1).max(100).regex(SAFE_MIME_RE),
     dataBase64: z.string().min(1).max(11_500_000),
   })
   .strict();
@@ -319,7 +322,7 @@ const saveDocSchema = z
     title: z.string().trim().min(1).max(120),
     category: z.enum(FILE_CATEGORIES).optional(),
     teamId: z.string().trim().nullable().optional(),
-    contentMd: z.string().min(1).max(80_000),
+    contentMd: z.string().trim().min(1).max(80_000),
     templateKind: z.enum(HANDBOOK_TEMPLATES).nullable().optional(),
   })
   .strict();
@@ -1207,8 +1210,7 @@ export function createApp(options: CreateAppOptions) {
       const stem = newTeamName.replace(/組$/, "").trim();
       const fromTeam =
         resolveBotTeam(snap, p.fromTeamId, p.fromTeamName) ??
-        snap.teams.find((t) => t.name !== newTeamName && stem && t.name.includes(stem)) ??
-        snap.teams.find((t) => /[&＆、／/+]/.test(t.name));
+        snap.teams.find((t) => t.name !== newTeamName && stem && t.name.includes(stem));
 
       const color = (TEAM_COLORS as readonly string[]).includes(String(p.newColor))
         ? (String(p.newColor) as TeamColor)
@@ -1225,17 +1227,11 @@ export function createApp(options: CreateAppOptions) {
         });
 
       if (fromTeam && fromTeam.id !== createdTeam.id) {
-        const escapedStem = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const escapedStem = escapeRegExp(stem);
         const autoRenamed =
           typeof p.renameFromTo === "string" && p.renameFromTo.trim()
             ? p.renameFromTo.trim()
-            : (() => {
-                const stripped = fromTeam.name
-                  .replace(new RegExp(`[&＆、／/+與和及]?${escapedStem}(?:組)?`, "g"), "")
-                  .replace(/^[&＆、／/+與和及]+|[&＆、／/+與和及]+$/g, "")
-                  .trim();
-                return stripped ? (stripped.endsWith("組") ? stripped : `${stripped}組`) : fromTeam.name;
-              })();
+            : cleanSplitOriginTeamName(fromTeam.name, stem);
         store.updateTeam(fromTeam.id, {
           name: autoRenamed,
           ...(typeof p.fromHeadcount === "number" ? { targetHeadcount: p.fromHeadcount } : {}),
@@ -1253,7 +1249,7 @@ export function createApp(options: CreateAppOptions) {
           try {
             kwRegex = new RegExp(rawKw, "i");
           } catch {
-            kwRegex = null;
+            kwRegex = new RegExp(escapeRegExp(rawKw), "i");
           }
         }
         const movedTodos = snap.todos.filter(
