@@ -910,7 +910,7 @@ test("External AI split_team escapes invalid regex moveKeyword and avoids blind 
   }
 });
 
-test("Blank campaign Bot commands do not hijack intent or overwrite brief", async () => {
+test("Blank and seeded campaign Bot commands do not hijack operational intents or overwrite brief", async () => {
   await withServer(async (baseUrl, store) => {
     const createBlank = async (name: string) => {
       const res = await fetch(`${baseUrl}/api/campaigns`, {
@@ -972,5 +972,61 @@ test("Blank campaign Bot commands do not hijack intent or overwrite brief", asyn
     assert.equal(rSplit.snap.campaign.brief, "");
     assert.ok(rSplit.snap.teams.some((t) => t.name === "轉播組"));
     assert.ok(rSplit.snap.teams.some((t) => t.name === "總召組"));
+
+    // e. Blank campaign add_todo containing event-type noun ("工作坊") -> only add_todo, brief stays ""
+    const campC = await createBlank("空白專案C");
+    const rWorkshopTodo = await postBot(campC.campaign.id, "幫我新增待辦：確認工作坊場地");
+    assert.deepEqual(
+      rWorkshopTodo.proposals.map((p) => p.kind),
+      ["add_todo"],
+    );
+    assert.equal(rWorkshopTodo.snap.todos.length, 1);
+    assert.equal(rWorkshopTodo.snap.campaign.brief, "");
+
+    // f. Blank campaign split_team containing event-type noun ("工作坊") -> only split_team, brief stays ""
+    const campD = await createBlank("空白專案D");
+    store.addTeam(campD.campaign.id, { name: "課程&工作坊組", lead: "lead", targetHeadcount: 4 });
+    const rWorkshopSplit = await postBot(campD.campaign.id, "把工作坊組從課程&工作坊組獨立出來");
+    assert.deepEqual(
+      rWorkshopSplit.proposals.map((p) => p.kind),
+      ["split_team"],
+    );
+    assert.equal(rWorkshopSplit.snap.campaign.brief, "");
+    assert.ok(rWorkshopSplit.snap.teams.some((t) => t.name === "工作坊組"));
+    assert.ok(rWorkshopSplit.snap.teams.some((t) => t.name === "課程組"));
+
+    // g. Blank campaign explicit brief onboarding -> setup_project_brief populates brief
+    const campE = await createBlank("空白專案E");
+    const rOnboard = await postBot(campE.campaign.id, "我們想辦一場給大一新生的三天兩夜 AI 黑客松");
+    assert.deepEqual(
+      rOnboard.proposals.map((p) => p.kind),
+      ["setup_project_brief"],
+    );
+    const seededBrief = rOnboard.snap.campaign.brief;
+    assert.ok(seededBrief.includes("三天兩夜 AI 黑客松"));
+
+    // h. Seeded campaign operational commands with colliding keywords preserve existing brief
+    const todosBefore = rOnboard.snap.todos.length;
+    const rSeededTodo = await postBot(campE.campaign.id, "幫我新增待辦：確認黑客松場地");
+    assert.deepEqual(
+      rSeededTodo.proposals.map((p) => p.kind),
+      ["add_todo"],
+    );
+    assert.equal(rSeededTodo.snap.todos.length, todosBefore + 1);
+    assert.equal(rSeededTodo.snap.campaign.brief, seededBrief);
+
+    const rSeededNote = await postBot(campE.campaign.id, "幫我記下靈感：加入閃電講環節");
+    assert.deepEqual(
+      rSeededNote.proposals.map((p) => p.kind),
+      ["create_note"],
+    );
+    assert.equal(rSeededNote.snap.campaign.brief, seededBrief);
+
+    const rSeededHandbook = await postBot(campE.campaign.id, "幫我生成工作坊行前手冊");
+    assert.deepEqual(
+      rSeededHandbook.proposals.map((p) => p.kind),
+      ["generate_handbook"],
+    );
+    assert.equal(rSeededHandbook.snap.campaign.brief, seededBrief);
   });
 });
