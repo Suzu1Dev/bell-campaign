@@ -1,11 +1,15 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   BookOpen,
+  Columns2,
   Copy,
   Download,
+  ExternalLink,
+  Eye,
   FileText,
   Image as ImageIcon,
+  Pencil,
   Sparkles,
   Trash2,
   Upload,
@@ -18,7 +22,42 @@ import {
   type FileCategory,
   type HandbookTemplate,
 } from "../../shared/types";
+import { inferUploadMimeType } from "../../shared/docs";
+import type { SuiteLinks } from "../../shared/suite";
 import { apiWrite } from "../lib/api";
+import MarkdownPreview from "./MarkdownPreview";
+import SuiteHandoffMenu from "./SuiteHandoffMenu";
+
+type FilePreviewKind = "image" | "pdf" | "markdown" | "text" | "binary";
+
+function classifyFilePreview(file: CampaignFile): FilePreviewKind {
+  const mime = (file.mimeType || "").toLowerCase();
+  if (mime.startsWith("image/")) return "image";
+  if (mime === "application/pdf" || /\.pdf$/i.test(file.fileName)) return "pdf";
+  if (file.kind === "generated" || mime === "text/markdown" || /\.(md|markdown)$/i.test(file.fileName)) {
+    return "markdown";
+  }
+  if (mime.startsWith("text/") || mime === "application/json" || /\.(txt|csv|json|log)$/i.test(file.fileName)) {
+    return "text";
+  }
+  return "binary";
+}
+
+function getFileTypeBadge(file: CampaignFile): string {
+  const kind = classifyFilePreview(file);
+  if (kind === "pdf") return "PDF";
+  if (kind === "markdown") return "MD";
+  const ext = file.fileName.trim().split(".").pop()?.toUpperCase();
+  if (ext && ext.length <= 5 && ext !== file.fileName.toUpperCase()) return ext;
+  return "FILE";
+}
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
 
 const CATEGORY_LABELS: Record<FileCategory, string> = {
   handbook: "行前手冊／提醒",
@@ -37,10 +76,12 @@ const TEMPLATE_OPTIONS: Array<{ id: HandbookTemplate; label: string; hint: strin
 
 export default function FilesHandbookView({
   snapshot,
+  suiteLinks,
   onSnapshot,
   notify,
 }: {
   snapshot: CampaignSnapshot;
+  suiteLinks: SuiteLinks;
   onSnapshot: (next: CampaignSnapshot) => void;
   notify: (msg: string) => void;
 }) {
@@ -55,6 +96,39 @@ export default function FilesHandbookView({
 
   const [viewingFile, setViewingFile] = useState<CampaignFile | null>(null);
   const [editDocText, setEditDocText] = useState("");
+  const [docViewMode, setDocViewMode] = useState<"preview" | "split" | "edit">("preview");
+  const [loadingRawText, setLoadingRawText] = useState(false);
+
+  const openFileModal = (file: CampaignFile) => {
+    setViewingFile(file);
+    setEditDocText(file.contentMd);
+    setDocViewMode("preview");
+  };
+
+  useEffect(() => {
+    if (!viewingFile) return;
+    const kind = classifyFilePreview(viewingFile);
+    if ((kind !== "markdown" && kind !== "text") || viewingFile.contentMd) {
+      setLoadingRawText(false);
+      return;
+    }
+    let cancelled = false;
+    setLoadingRawText(true);
+    fetch(`/api/files/${viewingFile.id}/raw`)
+      .then((res) => (res.ok ? res.text() : ""))
+      .then((txt) => {
+        if (!cancelled && txt) setEditDocText(txt);
+      })
+      .catch(() => {
+        // ignore fallback read errors
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingRawText(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [viewingFile]);
 
   // Upload dialog state
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -84,8 +158,7 @@ export default function FilesHandbookView({
       });
       onSnapshot(res.snapshot);
       if (res.file) {
-        setViewingFile(res.file);
-        setEditDocText(res.file.contentMd);
+        openFileModal(res.file);
       }
       notify("已自動生成並歸檔行前文件");
     } catch (err) {
@@ -105,11 +178,12 @@ export default function FilesHandbookView({
     const reader = new FileReader();
     reader.onload = () => {
       const result = String(reader.result ?? "");
-      setPickedFile({ name: f.name, type: f.type || "application/octet-stream", base64: result });
+      const resolvedMime = inferUploadMimeType(f.name, f.type);
+      setPickedFile({ name: f.name, type: resolvedMime, base64: result });
       if (!uploadTitle.trim()) {
         setUploadTitle(f.name.replace(/\.[^.]+$/, ""));
       }
-      if (f.type.startsWith("image/")) setUploadCat("social");
+      if (resolvedMime.startsWith("image/")) setUploadCat("social");
     };
     reader.readAsDataURL(f);
   }
@@ -251,31 +325,36 @@ export default function FilesHandbookView({
 
         <div className="file-grid">
           {visibleFiles.map((file) => {
-            const isImage = file.mimeType.startsWith("image/");
+            const previewKind = classifyFilePreview(file);
+            const isImage = previewKind === "image";
+            const badgeLabel = getFileTypeBadge(file);
             const team = snapshot.teams.find((t) => t.id === file.teamId);
             return (
               <div
                 key={file.id}
                 className="card"
                 style={{ overflow: "hidden", display: "flex", flexDirection: "column", cursor: "pointer" }}
-                onClick={() => {
-                  setViewingFile(file);
-                  setEditDocText(file.contentMd);
-                }}
+                onClick={() => openFileModal(file)}
               >
                 <div className="file-thumb">
                   {isImage ? (
                     <img src={`/api/files/${file.id}/raw`} alt={file.title} loading="lazy" />
-                  ) : file.category === "handbook" ? (
+                  ) : previewKind === "markdown" && file.contentMd ? (
                     <div style={{ padding: 14, fontSize: 12, color: "var(--text-2)", lineHeight: 1.5, width: "100%", height: "100%", overflow: "hidden" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--campaign-text)", fontWeight: 600, marginBottom: 4 }}>
-                        <BookOpen size={14} />
-                        <span>AI 生成手冊</span>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, marginBottom: 4 }}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--campaign-text)", fontWeight: 600 }}>
+                          <BookOpen size={14} />
+                          <span>{file.kind === "generated" ? "AI 生成手冊" : "Markdown 文件"}</span>
+                        </span>
+                        <span className="file-type-badge">{badgeLabel}</span>
                       </div>
                       {file.contentMd.replace(/^#+\s*/gm, "").slice(0, 110)}…
                     </div>
                   ) : (
-                    <FileText size={32} style={{ color: "var(--text-3)" }} />
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+                      <FileText size={30} style={{ color: "var(--text-3)" }} />
+                      <span className={`file-type-badge ${previewKind === "pdf" ? "is-pdf" : ""}`}>{badgeLabel}</span>
+                    </div>
                   )}
                 </div>
 
@@ -288,7 +367,7 @@ export default function FilesHandbookView({
                   </div>
                   <strong style={{ fontSize: 13.5, lineHeight: 1.4 }}>{file.title}</strong>
                   <div style={{ marginTop: "auto", paddingTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: "var(--text-3)" }}>
-                    <span>{file.fileName}</span>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.fileName}</span>
                     {isImage ? <ImageIcon size={13} /> : <FileText size={13} />}
                   </div>
                 </div>
@@ -303,106 +382,232 @@ export default function FilesHandbookView({
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
           <Dialog.Content className="dialog-content is-wide">
-            {viewingFile && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-                  <div>
-                    <Dialog.Title style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>
-                      {viewingFile.title}
-                    </Dialog.Title>
-                    <div style={{ fontSize: 12.5, color: "var(--text-3)", marginTop: 2 }}>
-                      {CATEGORY_LABELS[viewingFile.category]} · {viewingFile.fileName}
+            {viewingFile &&
+              (() => {
+                const previewKind = classifyFilePreview(viewingFile);
+                const canEditDoc = viewingFile.kind === "generated";
+                const canCopyText = previewKind === "markdown" || previewKind === "text";
+                return (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                      <div style={{ minWidth: 0 }}>
+                        <Dialog.Title style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>
+                          {viewingFile.title}
+                        </Dialog.Title>
+                        <div style={{ fontSize: 12.5, color: "var(--text-3)", marginTop: 2 }}>
+                          {CATEGORY_LABELS[viewingFile.category]} · {viewingFile.fileName}
+                          {viewingFile.sizeBytes > 0 ? ` · ${formatFileSize(viewingFile.sizeBytes)}` : ""}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        {previewKind === "markdown" && (
+                          <div className="segmented-inline" role="tablist" aria-label="文件檢視模式">
+                            <button
+                              type="button"
+                              role="tab"
+                              aria-selected={docViewMode === "preview"}
+                              className={`seg-btn ${docViewMode === "preview" ? "is-active" : ""}`}
+                              onClick={() => setDocViewMode("preview")}
+                            >
+                              <Eye size={12} />
+                              <span>預覽</span>
+                            </button>
+                            <button
+                              type="button"
+                              role="tab"
+                              aria-selected={docViewMode === "split"}
+                              className={`seg-btn ${docViewMode === "split" ? "is-active" : ""}`}
+                              onClick={() => setDocViewMode("split")}
+                            >
+                              <Columns2 size={12} />
+                              <span>並排</span>
+                            </button>
+                            <button
+                              type="button"
+                              role="tab"
+                              aria-selected={docViewMode === "edit"}
+                              className={`seg-btn ${docViewMode === "edit" ? "is-active" : ""}`}
+                              onClick={() => setDocViewMode("edit")}
+                            >
+                              <Pencil size={12} />
+                              <span>{canEditDoc ? "編輯" : "原始碼"}</span>
+                            </button>
+                          </div>
+                        )}
+                        <Dialog.Close asChild>
+                          <button type="button" className="icon-btn" aria-label="關閉">
+                            <X size={15} />
+                          </button>
+                        </Dialog.Close>
+                      </div>
+                    </div>
+
+                    {previewKind === "image" ? (
+                      <div style={{ background: "var(--panel)", borderRadius: "var(--radius-md)", padding: 12, border: "1px solid var(--line)", textAlign: "center" }}>
+                        <img
+                          src={`/api/files/${viewingFile.id}/raw`}
+                          alt={viewingFile.title}
+                          style={{ maxWidth: "100%", maxHeight: "460px", borderRadius: "var(--radius-sm)" }}
+                        />
+                      </div>
+                    ) : previewKind === "pdf" ? (
+                      <iframe
+                        src={`/api/files/${viewingFile.id}/raw?inline=1`}
+                        title={viewingFile.title}
+                        className="file-pdf-frame"
+                      />
+                    ) : previewKind === "markdown" ? (
+                      loadingRawText ? (
+                        <div style={{ padding: 24, textAlign: "center", color: "var(--text-3)", fontSize: 13 }}>
+                          正在讀取 Markdown 文件內容…
+                        </div>
+                      ) : docViewMode === "preview" ? (
+                        <MarkdownPreview content={editDocText} />
+                      ) : docViewMode === "split" ? (
+                        <div className="md-split-pane">
+                          <textarea
+                            className="textarea"
+                            rows={16}
+                            readOnly={!canEditDoc}
+                            value={editDocText}
+                            onChange={(e) => canEditDoc && setEditDocText(e.target.value)}
+                            style={{ fontFamily: "var(--font-mono)", fontSize: 12.5, minHeight: 360 }}
+                          />
+                          <MarkdownPreview content={editDocText} />
+                        </div>
+                      ) : (
+                        <textarea
+                          className="textarea"
+                          rows={15}
+                          readOnly={!canEditDoc}
+                          value={editDocText}
+                          onChange={(e) => canEditDoc && setEditDocText(e.target.value)}
+                          style={{ fontFamily: "var(--font-mono)", fontSize: 13 }}
+                        />
+                      )
+                    ) : previewKind === "text" ? (
+                      loadingRawText ? (
+                        <div style={{ padding: 24, textAlign: "center", color: "var(--text-3)", fontSize: 13 }}>
+                          正在讀取檔案內容…
+                        </div>
+                      ) : (
+                        <pre className="file-text-pre">{editDocText || "（空檔案）"}</pre>
+                      )
+                    ) : (
+                      <div className="file-binary-card">
+                        <span className="file-type-badge" style={{ fontSize: 12, padding: "4px 10px" }}>
+                          {getFileTypeBadge(viewingFile)}
+                        </span>
+                        <div style={{ fontWeight: 600, fontSize: 14 }}>{viewingFile.fileName}</div>
+                        <div style={{ fontSize: 12.5, color: "var(--text-3)" }}>
+                          {viewingFile.mimeType} · {formatFileSize(viewingFile.sizeBytes)}
+                        </div>
+                        <a className="btn btn-primary btn-sm" href={`/api/files/${viewingFile.id}/raw?download=1`} download={viewingFile.fileName}>
+                          <Download size={13} />
+                          <span>下載此檔案</span>
+                        </a>
+                      </div>
+                    )}
+
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        {previewKind === "pdf" && (
+                          <a
+                            className="btn btn-sm"
+                            href={`/api/files/${viewingFile.id}/raw?inline=1`}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            <ExternalLink size={13} />
+                            <span>新分頁開啟</span>
+                          </a>
+                        )}
+                        <a className="btn btn-sm" href={`/api/files/${viewingFile.id}/raw?download=1`} download={viewingFile.fileName}>
+                          <Download size={13} />
+                          <span>下載檔案</span>
+                        </a>
+                        {canCopyText && (
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            onClick={async () => {
+                              await navigator.clipboard.writeText(editDocText);
+                              notify("已複製文件內容");
+                            }}
+                          >
+                            <Copy size={13} />
+                            <span>複製全文</span>
+                          </button>
+                        )}
+                        <SuiteHandoffMenu
+                          links={suiteLinks}
+                          title={viewingFile.title}
+                          text={
+                            previewKind === "markdown" || previewKind === "text"
+                              ? editDocText.trim() || viewingFile.contentMd.trim()
+                              : [
+                                  `專案文件：${viewingFile.title}`,
+                                  `檔名：${viewingFile.fileName}（${CATEGORY_LABELS[viewingFile.category]} · ${viewingFile.mimeType}${viewingFile.sizeBytes > 0 ? ` · ${formatFileSize(viewingFile.sizeBytes)}` : ""}）`,
+                                  `活動專案：${snapshot.campaign.name}`,
+                                  "請協助整理重點、確認注意事項或轉換為團隊待辦。",
+                                ].join("\n")
+                          }
+                          back="#/files"
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={async () => {
+                            try {
+                              const next = await apiWrite<CampaignSnapshot>(
+                                `/api/files/${viewingFile.id}?campaignId=${encodeURIComponent(snapshot.campaign.id)}`,
+                                "DELETE",
+                              );
+                              onSnapshot(next);
+                              setViewingFile(null);
+                              notify("已刪除歸檔項目");
+                            } catch (err) {
+                              notify(err instanceof Error ? err.message : "刪除失敗");
+                            }
+                          }}
+                        >
+                          <Trash2 size={13} />
+                          <span>刪除</span>
+                        </button>
+                      </div>
+
+                      {canEditDoc && editDocText.trim().length > 0 && (
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          onClick={async () => {
+                            try {
+                              const next = await apiWrite<CampaignSnapshot>(
+                                `/api/campaigns/${snapshot.campaign.id}/files/doc`,
+                                "POST",
+                                {
+                                  id: viewingFile.id,
+                                  title: viewingFile.title,
+                                  category: viewingFile.category,
+                                  teamId: viewingFile.teamId,
+                                  contentMd: editDocText,
+                                },
+                              );
+                              onSnapshot(next);
+                              setViewingFile(null);
+                              notify("已更新手冊內容");
+                            } catch (err) {
+                              notify(err instanceof Error ? err.message : "儲存修改失敗");
+                            }
+                          }}
+                        >
+                          儲存修改
+                        </button>
+                      )}
                     </div>
                   </div>
-                  <Dialog.Close asChild>
-                    <button type="button" className="icon-btn" aria-label="關閉">
-                      <X size={15} />
-                    </button>
-                  </Dialog.Close>
-                </div>
-
-                {viewingFile.mimeType.startsWith("image/") ? (
-                  <div style={{ background: "var(--panel)", borderRadius: "var(--radius-md)", padding: 12, border: "1px solid var(--line)", textAlign: "center" }}>
-                    <img
-                      src={`/api/files/${viewingFile.id}/raw`}
-                      alt={viewingFile.title}
-                      style={{ maxWidth: "100%", maxHeight: "460px", borderRadius: "var(--radius-sm)" }}
-                    />
-                  </div>
-                ) : (
-                  <textarea
-                    className="textarea"
-                    rows={15}
-                    value={editDocText}
-                    onChange={(e) => setEditDocText(e.target.value)}
-                    style={{ fontFamily: "var(--font-sans)", fontSize: 13.5 }}
-                  />
-                )}
-
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <a className="btn btn-sm" href={`/api/files/${viewingFile.id}/raw?download=1`} download={viewingFile.fileName}>
-                      <Download size={13} />
-                      <span>下載檔案</span>
-                    </a>
-                    {!viewingFile.mimeType.startsWith("image/") && (
-                      <button
-                        type="button"
-                        className="btn btn-sm"
-                        onClick={async () => {
-                          await navigator.clipboard.writeText(editDocText);
-                          notify("已複製手冊內容");
-                        }}
-                      >
-                        <Copy size={13} />
-                        <span>複製全文</span>
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      onClick={async () => {
-                        const next = await apiWrite<CampaignSnapshot>(
-                          `/api/files/${viewingFile.id}?campaignId=${encodeURIComponent(snapshot.campaign.id)}`,
-                          "DELETE",
-                        );
-                        onSnapshot(next);
-                        setViewingFile(null);
-                        notify("已刪除歸檔項目");
-                      }}
-                    >
-                      <Trash2 size={13} />
-                      <span>刪除</span>
-                    </button>
-                  </div>
-
-                  {!viewingFile.mimeType.startsWith("image/") && (
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={async () => {
-                        const next = await apiWrite<CampaignSnapshot>(
-                          `/api/campaigns/${snapshot.campaign.id}/files/doc`,
-                          "POST",
-                          {
-                            id: viewingFile.id,
-                            title: viewingFile.title,
-                            category: viewingFile.category,
-                            teamId: viewingFile.teamId,
-                            contentMd: editDocText,
-                          },
-                        );
-                        onSnapshot(next);
-                        setViewingFile(null);
-                        notify("已更新手冊內容");
-                      }}
-                    >
-                      儲存修改
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
+                );
+              })()}
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

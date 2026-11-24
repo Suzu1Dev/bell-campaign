@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildAppsScriptSyncCode,
   buildGoogleSheetMatrix,
   buildPacingSchedulePreview,
   buildWeeklyTimelineDefs,
@@ -15,6 +16,7 @@ import {
 } from "./sheets.js";
 import {
   curateComparableEvents,
+  inferUploadMimeType,
   meetingToGoogleDocHtml,
   meetingToHackMd,
   parseMeetingDoc,
@@ -25,7 +27,11 @@ import {
   parseCampaignHandoff,
   personalTaskHref,
   prDraftHref,
+  safePublicHttpUrl,
+  suiteHandoffUrl,
 } from "./suite.js";
+import { buildSlidesDeckModel, buildStyledSheetModel, renderSingleSlideHtml } from "./exporters.js";
+import { isSafeMarkdownUrl, parseMarkdownBlocks } from "./markdown.js";
 import { CampaignStore } from "../server/store.js";
 
 const REFERENCE_GSHEET_CSV = `,月,六月,,七月,,,,八月
@@ -197,6 +203,101 @@ test("Suite handoff parser enforces allowlisted origins, single params, and clea
   const prParams = new URLSearchParams(prHref!.split("?")[1]);
   assert.equal(prParams.get("from"), "campaign");
   assert.equal(prParams.get("back"), "#/tasks");
+
+  // Unified suiteHandoffUrl across all 4 siblings
+  assert.equal(safePublicHttpUrl("https://hackmd.io/@bell/sync"), "https://hackmd.io/@bell/sync");
+  assert.equal(safePublicHttpUrl("javascript:alert(1)"), undefined);
+  assert.equal(safePublicHttpUrl("data:text/html,hi"), undefined);
+
+  const uExplain = suiteHandoffUrl(
+    "explain",
+    {
+      origin: "http://127.0.0.1:20001",
+      text: "會議決議細節",
+      title: "週會\n紀錄",
+      back: "#/meetings",
+    },
+    "127.0.0.1",
+  );
+  assert.ok(uExplain?.startsWith("http://127.0.0.1:20001/#/explain?"));
+  const expParams = new URLSearchParams(uExplain!.split("?")[1]);
+  assert.equal(expParams.get("text"), "會議決議細節");
+  assert.equal(expParams.get("title"), "週會 紀錄");
+  assert.equal(expParams.get("from"), "campaign");
+  assert.equal(expParams.get("back"), "#/meetings");
+
+  const uReaderSafe = suiteHandoffUrl(
+    "reader",
+    {
+      origin: "http://127.0.0.1:21104",
+      text: "議程大綱",
+      title: "對齊會議",
+      url: "https://hackmd.io/@bell/sync",
+      back: "#/files",
+    },
+    "127.0.0.1",
+  );
+  assert.ok(uReaderSafe?.startsWith("http://127.0.0.1:21104/#/read?"));
+  const readerParams = new URLSearchParams(uReaderSafe!.split("?")[1]);
+  assert.equal(readerParams.get("url"), "https://hackmd.io/@bell/sync");
+  assert.equal(readerParams.get("back"), "#/files");
+
+  const uReaderUnsafeUrl = suiteHandoffUrl(
+    "reader",
+    {
+      origin: "http://127.0.0.1:21104",
+      text: "議程大綱",
+      url: "javascript:alert(1)",
+      back: "#/files",
+    },
+    "127.0.0.1",
+  );
+  assert.equal(new URLSearchParams(uReaderUnsafeUrl!.split("?")[1]).has("url"), false);
+
+  const uPersonal = suiteHandoffUrl(
+    "personal",
+    {
+      origin: "http://127.0.0.1:20003",
+      title: "志工審核",
+      text: "寄發錄取通知",
+      back: "#/forms",
+    },
+    "127.0.0.1",
+  );
+  assert.ok(uPersonal?.startsWith("http://127.0.0.1:20003/#/tasks?"));
+  const persParams = new URLSearchParams(uPersonal!.split("?")[1]);
+  assert.equal(persParams.get("draft"), "志工審核 — 寄發錄取通知");
+  assert.equal(persParams.has("title"), false);
+  assert.equal(persParams.get("from"), "campaign");
+  assert.equal(persParams.get("back"), "#/forms");
+
+  // Already-prefixed personal draft should not double-prepend
+  const uPersonalPrefixed = suiteHandoffUrl(
+    "personal",
+    {
+      origin: "http://127.0.0.1:20003",
+      title: "志工審核",
+      text: "志工審核 — 寄發錄取通知",
+      back: "#/forms",
+    },
+    "127.0.0.1",
+  );
+  assert.equal(
+    new URLSearchParams(uPersonalPrefixed!.split("?")[1]).get("draft"),
+    "志工審核 — 寄發錄取通知",
+  );
+
+  // Unsafe origin & disallowed back routes
+  assert.equal(
+    suiteHandoffUrl("explain", { origin: "https://evil.example.com", text: "hi" }, "127.0.0.1"),
+    undefined,
+  );
+  const badBack = suiteHandoffUrl(
+    "pr",
+    { origin: "http://127.0.0.1:20002", text: "PR draft", back: "#/not-allowed" },
+    "127.0.0.1",
+  );
+  assert.equal(new URLSearchParams(badBack!.split("?")[1]).has("back"), false);
 });
 
 test("Bidirectional Google Docs & HackMD meeting parser round-trips cleanly and curates benchmarks", () => {
@@ -267,4 +368,106 @@ test("Bidirectional Google Docs & HackMD meeting parser round-trips cleanly and 
   });
   assert.ok(ctfCurated.some((c) => /LiveCTF/i.test(c.title)));
   assert.ok(ctfCurated.some((c) => /資安社/.test(c.title)));
+});
+
+test("renderSingleSlideHtml matrix wraps .dk-mx-team inside <td> and Markdown parser handles GFM + XSS safely", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bell-campaign-md-"));
+  try {
+    const store = new CampaignStore(join(dir, "campaign.db"), join(dir, "uploads"));
+    const snap = store.getSnapshot();
+    const slides = buildSlidesDeckModel(snap);
+    const matrixSlide = slides.find((s) => s.kind === "matrix");
+    assert.ok(matrixSlide);
+    const matrixHtml = renderSingleSlideHtml(matrixSlide, snap.campaign.name, slides.length);
+    assert.match(matrixHtml, /<td><div class="dk-mx-team">/);
+    assert.doesNotMatch(matrixHtml, /<td class="dk-mx-team">/);
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  // Safe URL checks
+  assert.equal(isSafeMarkdownUrl("https://example.com/a"), true);
+  assert.equal(isSafeMarkdownUrl("http://127.0.0.1:21105/#/schedule"), true);
+  assert.equal(isSafeMarkdownUrl("/api/files/1/raw"), true);
+  assert.equal(isSafeMarkdownUrl("#section"), true);
+  assert.equal(isSafeMarkdownUrl("//evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("///evil.com"), false);
+  assert.equal(isSafeMarkdownUrl("/\\evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("/\t/evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("/\r/evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("/\t\\evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("/\u0000/evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("/\u000b/evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("/\u007f/evil.com/phish"), false);
+  assert.equal(isSafeMarkdownUrl("javascript:alert(1)"), false);
+  assert.equal(isSafeMarkdownUrl("data:text/html,<script>alert(1)</script>"), false);
+
+  const md = `# 籌備手冊
+> 注意 **9:00** 準時報到
+
+---
+
+- [x] 已完成 \`場勘\`
+- [ ] 待確認 [官方網站](https://example.com)、[危險連結](javascript:alert(1)) 與 [控制字元](/\t/evil.com/phish)
+
+| 組別 | 窗口 |
+| :--- | ---: |
+| 行銷組 | 3 |
+
+\`\`\`bash
+echo "hello"
+\`\`\`
+`;
+  const blocks = parseMarkdownBlocks(md);
+  assert.equal(blocks[0]?.type, "heading");
+  assert.equal(blocks[1]?.type, "blockquote");
+  assert.equal(blocks[2]?.type, "hr");
+  assert.equal(blocks[3]?.type, "list");
+  if (blocks[3]?.type === "list") {
+    assert.equal(blocks[3].items[0]?.checked, true);
+    assert.equal(blocks[3].items[1]?.checked, false);
+    const spans = blocks[3].items[1]?.spans ?? [];
+    assert.ok(spans.some((s) => s.type === "link" && s.href === "https://example.com"));
+    assert.ok(!spans.some((s) => s.type === "link" && s.href.startsWith("javascript:")));
+    assert.ok(!spans.some((s) => s.type === "link" && s.label === "控制字元"));
+    assert.ok(spans.some((s) => s.type === "text" && s.text === "危險連結"));
+    assert.ok(spans.some((s) => s.type === "text" && s.text === "控制字元"));
+  }
+  assert.equal(blocks[4]?.type, "table");
+  assert.equal(blocks[5]?.type, "code");
+});
+
+test("Regression guards: surrogate-safe sheetName, empty-weeks pacing, and CRLF MIME fallback", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bell-campaign-reg-"));
+  try {
+    const store = new CampaignStore(join(dir, "campaign.db"), join(dir, "uploads"));
+    const snap = store.getSnapshot();
+    const emojiSnap = {
+      ...snap,
+      campaign: { ...snap.campaign, name: "a".repeat(27) + "🎉" + "suffix" },
+    };
+
+    const sheetModel = buildStyledSheetModel(emojiSnap);
+    assert.equal(sheetModel.sheetName, "a".repeat(27) + "🎉");
+    assert.equal(Buffer.from(sheetModel.sheetName, "utf8").toString("utf8"), sheetModel.sheetName);
+
+    const appsScript = buildAppsScriptSyncCode(emojiSnap);
+    assert.ok(appsScript.includes(JSON.stringify("a".repeat(27) + "🎉")));
+
+    const emptyWeekPreview = buildPacingSchedulePreview(
+      { weeks: [], teams: snap.teams, cells: [], todos: [] },
+      { mainGoal: "", monthlyGoals: [], tasksText: "孤立任務", pacing: "balanced" },
+    );
+    assert.deepEqual(emptyWeekPreview.todos, []);
+    assert.deepEqual(emptyWeekPreview.cells, []);
+
+    assert.equal(inferUploadMimeType("notes.txt", "text/plain\r\nX-Injected: 1"), "text/plain");
+    assert.equal(inferUploadMimeType("notes.txt", "text/plain\r\n;charset=utf-8"), "text/plain");
+    assert.equal(inferUploadMimeType("notes.txt", "text/plain; charset=中文"), "text/plain");
+    assert.equal(inferUploadMimeType("unknown.bin", "bad\nmime"), "application/octet-stream");
+    store.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

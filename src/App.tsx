@@ -14,6 +14,7 @@ import {
   Moon,
   NotebookPen,
   PanelLeft,
+  Pencil,
   Plus,
   Sparkles,
   Sun,
@@ -34,6 +35,7 @@ import {
   formatCampaignDateLabel,
 } from "../shared/sheets";
 import { apiGet, apiWrite } from "./lib/api";
+import { formatShortcut, resolveInitialTheme } from "./lib/uiPrefs";
 import SuiteSwitcher from "./components/SuiteSwitcher";
 import ScheduleView from "./components/ScheduleView";
 import { MeetingsView, NotesView, TasksView } from "./components/TasksNotesMeetingsView";
@@ -72,26 +74,20 @@ function resolveRouteFromHash(hash: string): RouteKey {
 }
 
 function getInitialTheme(): "light" | "dark" {
-  try {
-    const saved = localStorage.getItem("bell.theme");
-    if (saved === "light" || saved === "dark") return saved;
-  } catch {
-    // ignore storage errors
-  }
-  return "light";
+  return resolveInitialTheme();
 }
 
 const ROUTE_TITLES: Record<RouteKey, { title: string; subtitle: string }> = {
-  schedule: { title: "每週倒數時程總表", subtitle: "對齊 Google 試算表結構 · 頂部整體進度軸與撞期避開" },
-  tasks: { title: "待辦事項與各組進度", subtitle: "追蹤各大組別專案進度與待辦完成率" },
-  partners: { title: "合作名單與臨時工編制", subtitle: "分類管理特邀講者、合作廠商接洽與臨時工任務完成狀況" },
-  forms: { title: "招工表單與人力雷達", subtitle: "視覺化審核志工回覆、試算表同步與各組缺口" },
-  inspirations: { title: "靈感借鏡", subtitle: "從國內外相似活動剖析專案相似處、時程巧思與前人避坑指南" },
-  files: { title: "文件歸檔與行前手冊生成", subtitle: "儲存社群圖片、廠商檔案並自動生成講者／籌備手冊" },
-  meetings: { title: "會議記錄與雲端雙向共筆", subtitle: "支援 Google 文件與 HackMD 雙向匯入匯出、大綱與決議管理" },
-  notes: { title: "個人筆記", subtitle: "記錄總召與個人的靈感、決策脈絡與備忘" },
-  bot: { title: "Campaign Bot", subtitle: "開案專案定位對焦、對話式操作時程、手冊與名單" },
-  handoff: { title: "跨工具草稿接收", subtitle: "確認後才會寫入 BELL Campaign 專案資料庫" },
+  schedule: { title: "每週倒數時程總表", subtitle: "對齊試算表框線與色塊 · 整體進度軸與撞期避開" },
+  tasks: { title: "待辦事項與各組進度", subtitle: "各組待辦清單與完成進度" },
+  partners: { title: "合作名單與支援編制", subtitle: "合作廠商、講師賽評與各校支援分工" },
+  forms: { title: "招工表單與人力雷達", subtitle: "志工報名審核與各組人力缺口" },
+  inspirations: { title: "靈感借鏡", subtitle: "相似賽事做法、時程節奏與踩坑提醒" },
+  files: { title: "文件歸檔與手冊生成", subtitle: "活動圖檔、廠商資料與行前手冊" },
+  meetings: { title: "會議記錄與雲端共筆", subtitle: "Google 文件／HackMD 雙向匯入匯出與決議" },
+  notes: { title: "個人筆記", subtitle: "總召備忘與防漏速查" },
+  bot: { title: "Campaign Bot", subtitle: "對話改時程、調分工、生手冊" },
+  handoff: { title: "跨工具草稿接收", subtitle: "確認後寫入專案資料庫" },
 };
 
 export default function App() {
@@ -144,6 +140,14 @@ export default function App() {
   const [newCampTentativeNote, setNewCampTentativeNote] = useState("");
   const [newCampPostWeeks, setNewCampPostWeeks] = useState(2);
 
+  // Edit / rename active campaign modal
+  const [editCampOpen, setEditCampOpen] = useState(false);
+  const [editCampName, setEditCampName] = useState("");
+  const [editCampSub, setEditCampSub] = useState("");
+  const [editCampBrief, setEditCampBrief] = useState("");
+  const [editCascadeRename, setEditCascadeRename] = useState(true);
+  const [editCampBusy, setEditCampBusy] = useState(false);
+
   const newCampTimelinePreview = useMemo(
     () =>
       buildWeeklyTimelineDefs({
@@ -163,12 +167,19 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    try {
-      localStorage.setItem("bell.theme", theme);
-    } catch {
-      // ignore
-    }
   }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => {
+      const next = prev === "dark" ? "light" : "dark";
+      try {
+        localStorage.setItem("bell.theme", next);
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  }, []);
 
   const loadManifest = useCallback(async () => {
     try {
@@ -349,6 +360,42 @@ export default function App() {
     await createCampaignFlow("bot");
   }
 
+  function openEditCampaign() {
+    if (!snapshot) return;
+    setEditCampName(snapshot.campaign.name);
+    setEditCampSub(snapshot.campaign.subtitle);
+    setEditCampBrief(snapshot.campaign.brief);
+    setEditCascadeRename(true);
+    setEditCampOpen(true);
+  }
+
+  async function handleSaveCampaignEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!snapshot || !editCampName.trim()) return;
+    const trimmedName = editCampName.trim();
+    const renamed = trimmedName !== snapshot.campaign.name;
+    setEditCampBusy(true);
+    try {
+      const next = await apiWrite<CampaignSnapshot>(
+        `/api/campaigns/${snapshot.campaign.id}`,
+        "PATCH",
+        {
+          name: trimmedName,
+          subtitle: editCampSub.trim(),
+          brief: editCampBrief.trim(),
+          cascadeRename: renamed && editCascadeRename,
+        },
+      );
+      setSnapshot(next);
+      setEditCampOpen(false);
+      notify(renamed ? `已將專案名稱更新為「${next.campaign.name}」` : "已更新專案資訊");
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "儲存專案名稱失敗");
+    } finally {
+      setEditCampBusy(false);
+    }
+  }
+
   const counts = useMemo(() => {
     if (!snapshot) return { openTodos: 0, partners: 0, pendingForms: 0, files: 0, overallPercent: 0 };
     const metrics = computeCampaignMetrics(snapshot);
@@ -380,6 +427,7 @@ export default function App() {
   ];
 
   const headerMeta = ROUTE_TITLES[route];
+  const switcherShortcut = useMemo(() => formatShortcut("K"), []);
 
   return (
     <div
@@ -400,7 +448,7 @@ export default function App() {
             type="button"
             className="suite-brand-btn"
             onClick={() => setSwitcherOpen(true)}
-            title="切換 BELL Suite 產品（⌘K）"
+            title={`切換 BELL Suite 產品（${switcherShortcut}）`}
           >
             <span className="brand-tile" aria-hidden="true">
               <CalendarRange size={14} />
@@ -431,21 +479,33 @@ export default function App() {
                   </option>
                 ))}
               </select>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 11.5, color: "var(--text-3)", gap: 6 }}>
-                <span className="tabular" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 11.5, color: "var(--text-3)", gap: 4 }}>
+                <span className="tabular" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
                   {snapshot.campaign.dateTentative
                     ? formatCampaignDateLabel(snapshot.campaign)
                     : `活動日 ${snapshot.campaign.eventDate}`}
                 </span>
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  style={{ height: 22, padding: "0 6px", fontSize: 11.5 }}
-                  onClick={() => setNewCampOpen(true)}
-                >
-                  <Plus size={12} />
-                  <span>新增</span>
-                </button>
+                <div style={{ display: "inline-flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    style={{ height: 22, padding: "0 5px", fontSize: 11.5 }}
+                    title="修改專案名稱、副標題與簡介"
+                    onClick={openEditCampaign}
+                  >
+                    <Pencil size={11} />
+                    <span>改名</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    style={{ height: 22, padding: "0 5px", fontSize: 11.5 }}
+                    onClick={() => setNewCampOpen(true)}
+                  >
+                    <Plus size={12} />
+                    <span>新增</span>
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -481,7 +541,7 @@ export default function App() {
             style={{ padding: "0 8px" }}
           >
             <span>切換工具</span>
-            <kbd className="p-kbd">⌘K</kbd>
+            <kbd className="p-kbd">{switcherShortcut}</kbd>
           </button>
 
           <button
@@ -489,7 +549,7 @@ export default function App() {
             className="icon-btn"
             aria-label={theme === "dark" ? "切換為淺色模式" : "切換為深色模式"}
             title={theme === "dark" ? "切換為淺色模式" : "切換為深色模式"}
-            onClick={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
+            onClick={toggleTheme}
           >
             {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
           </button>
@@ -525,7 +585,35 @@ export default function App() {
                   textOverflow: "ellipsis",
                 }}
               >
-                {snapshot ? `${snapshot.campaign.name} · ${headerMeta.subtitle}` : headerMeta.subtitle}
+                {snapshot ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={openEditCampaign}
+                      title="點擊修改專案名稱與資訊"
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 4,
+                        border: "none",
+                        background: "transparent",
+                        padding: 0,
+                        margin: 0,
+                        color: "var(--text-2)",
+                        fontWeight: 600,
+                        fontSize: 12,
+                        cursor: "pointer",
+                        verticalAlign: "baseline",
+                      }}
+                    >
+                      <span>{snapshot.campaign.name}</span>
+                      <Pencil size={10.5} style={{ opacity: 0.7 }} />
+                    </button>
+                    <span> · {headerMeta.subtitle}</span>
+                  </>
+                ) : (
+                  headerMeta.subtitle
+                )}
               </div>
             </div>
           </div>
@@ -541,7 +629,7 @@ export default function App() {
               type="button"
               className="icon-btn"
               aria-label={theme === "dark" ? "切換為淺色模式" : "切換為深色模式"}
-              onClick={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
+              onClick={toggleTheme}
             >
               {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
             </button>
@@ -672,12 +760,14 @@ export default function App() {
           ) : route === "files" ? (
             <FilesHandbookView
               snapshot={snapshot}
+              suiteLinks={suiteLinks}
               onSnapshot={setSnapshot}
               notify={notify}
             />
           ) : route === "meetings" ? (
             <MeetingsView
               snapshot={snapshot}
+              suiteLinks={suiteLinks}
               onSnapshot={setSnapshot}
               notify={notify}
             />
@@ -689,9 +779,14 @@ export default function App() {
               notify={notify}
             />
           ) : route === "bot" ? (
-            <BotView snapshot={snapshot} onSnapshot={setSnapshot} notify={notify} />
+            <BotView
+              snapshot={snapshot}
+              onSnapshot={setSnapshot}
+              onNavigateForms={() => navigate("forms")}
+              notify={notify}
+            />
           ) : (
-            <ScheduleView snapshot={snapshot} onSnapshot={setSnapshot} notify={notify} />
+            <ScheduleView key={snapshot.campaign.id} snapshot={snapshot} onSnapshot={setSnapshot} notify={notify} />
           )}
         </main>
       </div>
@@ -859,6 +954,104 @@ export default function App() {
                     <span>建立並與 Bot 聊聊規劃性質</span>
                   </button>
                 </div>
+              </div>
+            </form>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      {/* ── Edit / Rename Active Campaign Dialog ─────────────────────────── */}
+      <Dialog.Root open={editCampOpen} onOpenChange={setEditCampOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content" style={{ maxWidth: 520 }}>
+            <form onSubmit={handleSaveCampaignEdit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <Dialog.Title style={{ margin: 0, fontSize: 16.5, fontWeight: 700 }}>
+                  修改專案名稱與基本資訊
+                </Dialog.Title>
+                <Dialog.Close asChild>
+                  <button type="button" className="icon-btn" aria-label="關閉">
+                    <X size={15} />
+                  </button>
+                </Dialog.Close>
+              </div>
+              <Dialog.Description style={{ margin: 0, fontSize: 13, color: "var(--text-3)" }}>
+                修改後將即時套用至左側切換選單、時程總表、匯出試算表與多頁專案簡報。
+              </Dialog.Description>
+
+              <div>
+                <label className="field-label">活動專案名稱 *</label>
+                <input
+                  required
+                  autoFocus
+                  className="input"
+                  value={editCampName}
+                  onChange={(e) => setEditCampName(e.target.value)}
+                  placeholder="例如：TSCCTF-2027"
+                />
+              </div>
+
+              <div>
+                <label className="field-label">副標題／核心形式</label>
+                <input
+                  className="input"
+                  value={editCampSub}
+                  onChange={(e) => setEditCampSub(e.target.value)}
+                  placeholder="例如：台灣資安聯盟（TSC）跨校聯合新手 LiveCTF 資安競賽"
+                />
+              </div>
+
+              <div>
+                <label className="field-label">專案核心定位與簡介</label>
+                <textarea
+                  rows={3}
+                  className="textarea"
+                  value={editCampBrief}
+                  onChange={(e) => setEditCampBrief(e.target.value)}
+                />
+              </div>
+
+              {snapshot && editCampName.trim() && editCampName.trim() !== snapshot.campaign.name && (
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 8,
+                    padding: "9px 12px",
+                    borderRadius: "var(--radius-sm)",
+                    background: "var(--campaign-tint)",
+                    border: "1px solid var(--campaign-line)",
+                    fontSize: 12.5,
+                    lineHeight: 1.5,
+                    cursor: "pointer",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={editCascadeRename}
+                    onChange={(e) => setEditCascadeRename(e.target.checked)}
+                    style={{ marginTop: 3 }}
+                  />
+                  <span>
+                    同步將此專案內<strong>會議標題、歸檔手冊與招工表單</strong>中的「
+                    <strong>{snapshot.campaign.name}</strong>」一併替換為「
+                    <strong>{editCampName.trim()}</strong>」
+                  </span>
+                </label>
+              )}
+
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
+                <button type="button" className="btn" onClick={() => setEditCampOpen(false)}>
+                  取消
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={editCampBusy || !editCampName.trim()}
+                >
+                  <span>{editCampBusy ? "儲存中…" : "儲存變更"}</span>
+                </button>
               </div>
             </form>
           </Dialog.Content>

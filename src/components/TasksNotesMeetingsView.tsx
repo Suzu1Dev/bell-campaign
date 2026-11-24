@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   ArrowLeftRight,
-  ArrowUpRight,
   Calendar,
   CheckCircle2,
   Circle,
@@ -13,16 +12,16 @@ import {
   Pin,
   Plus,
   RefreshCw,
-  Sparkles,
   Trash2,
   Upload,
   X,
 } from "lucide-react";
 import type { CampaignMeeting, CampaignNote, CampaignSnapshot } from "../../shared/types";
-import { explainDraftHref, personalTaskHref, prDraftHref, type SuiteLinks } from "../../shared/suite";
+import type { SuiteLinks } from "../../shared/suite";
 import { computeCampaignMetrics } from "../../shared/sheets";
 import { detectDocSourceFromUrl, meetingToGoogleDocHtml, meetingToHackMd } from "../../shared/docs";
 import { apiWrite } from "../lib/api";
+import SuiteHandoffMenu from "./SuiteHandoffMenu";
 
 // ── 1. Tasks & Team Progress Tracking (`#/tasks`) ──────────────────────────
 export function TasksView({
@@ -220,111 +219,93 @@ export function TasksView({
             filteredTodos.map((td) => {
               const team = snapshot.teams.find((t) => t.id === td.teamId);
               const week = snapshot.weeks.find((w) => w.id === td.weekId);
-              const personalHref = personalTaskHref(
-                suiteLinks.personal,
+              const handoffLines = [
                 `[${snapshot.campaign.name} · ${team?.name ?? "籌備"}] ${td.title}`,
-                "#/tasks",
-                window.location.hostname,
-              );
-              const prHref = prDraftHref(
-                suiteLinks.pr,
-                {
-                  title: td.title,
-                  draft: `[${snapshot.campaign.name} · ${team?.name ?? "籌備"}] ${td.title}`,
-                  back: "#/tasks",
-                },
-                window.location.hostname,
-              );
+                week ? `週次：${week.countdownLabel}（${week.dateRange}）` : "",
+                td.assignee ? `負責人：${td.assignee}` : "",
+                td.dueDate ? `期限：${td.dueDate}` : "",
+              ].filter(Boolean);
               return (
-                <div
-                  key={td.id}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 10,
-                    padding: "10px 8px",
-                    borderTop: "1px solid var(--line)",
-                  }}
-                >
-                  <button
-                    type="button"
-                    aria-label={`切換完成：${td.title}`}
-                    onClick={async () => {
-                      const next = await apiWrite<CampaignSnapshot>(
-                        `/api/todos/${td.id}?campaignId=${encodeURIComponent(snapshot.campaign.id)}`,
-                        "PATCH",
-                        { done: !td.done },
-                      );
-                      onSnapshot(next);
-                    }}
-                    style={{
-                      border: "none",
-                      background: "transparent",
-                      padding: 0,
-                      cursor: "pointer",
-                      color: td.done ? "var(--ok)" : "var(--text-3)",
-                      flexShrink: 0,
-                    }}
-                  >
-                    {td.done ? <CheckCircle2 size={17} /> : <Circle size={17} />}
-                  </button>
-
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div
+                <div key={td.id} className="task-row">
+                  <div className="task-row-main">
+                    <button
+                      type="button"
+                      aria-label={`切換完成：${td.title}`}
+                      onClick={async () => {
+                        const next = await apiWrite<CampaignSnapshot>(
+                          `/api/todos/${td.id}?campaignId=${encodeURIComponent(snapshot.campaign.id)}`,
+                          "PATCH",
+                          { done: !td.done },
+                        );
+                        onSnapshot(next);
+                      }}
                       style={{
-                        fontSize: 14,
-                        fontWeight: 500,
-                        color: td.done ? "var(--text-3)" : "var(--text)",
-                        textDecoration: td.done ? "line-through" : "none",
+                        border: "none",
+                        background: "transparent",
+                        padding: 0,
+                        marginTop: 2,
+                        cursor: "pointer",
+                        color: td.done ? "var(--ok)" : "var(--text-3)",
+                        flexShrink: 0,
                       }}
                     >
-                      {td.title}
-                    </div>
-                    <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 3, flexWrap: "wrap", fontSize: 12, color: "var(--text-3)" }}>
-                      {team && (
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                          <span className={`team-dot team-dot-${team.color}`} />
-                          {team.name}
-                        </span>
-                      )}
-                      {week && <span>· {week.countdownLabel}（{week.dateRange}）</span>}
-                      {td.assignee && <span>· {td.assignee}</span>}
-                      {td.dueDate && <span className="tabular">· 期限 {td.dueDate}</span>}
+                      {td.done ? <CheckCircle2 size={17} /> : <Circle size={17} />}
+                    </button>
+
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div
+                        style={{
+                          fontSize: 14,
+                          fontWeight: 500,
+                          color: td.done ? "var(--text-3)" : "var(--text)",
+                          textDecoration: td.done ? "line-through" : "none",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {td.title}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 3, flexWrap: "wrap", fontSize: 12, color: "var(--text-3)" }}>
+                        {team && (
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                            <span className={`team-dot team-dot-${team.color}`} />
+                            {team.name}
+                          </span>
+                        )}
+                        {week && <span>· {week.countdownLabel}（{week.dateRange}）</span>}
+                        {td.assignee && <span>· {td.assignee}</span>}
+                        {td.dueDate && <span className="tabular">· 期限 {td.dueDate}</span>}
+                      </div>
                     </div>
                   </div>
 
-                  {td.priority === "high" && !td.done && <span className="pill pill-warn">高優先</span>}
+                  <div className="task-row-actions">
+                    {td.priority === "high" && !td.done && <span className="pill pill-warn">高優先</span>}
 
-                  {personalHref && (
-                    <a href={personalHref} className="suite-chip suite-chip-personal" title="送到 BELL Personal 待辦草稿">
-                      <span>送到 Personal</span>
-                      <ArrowUpRight size={12} />
-                    </a>
-                  )}
+                    <SuiteHandoffMenu
+                      compact
+                      links={suiteLinks}
+                      title={td.title}
+                      text={handoffLines.join("\n")}
+                      back="#/tasks"
+                    />
 
-                  {prHref && (
-                    <a href={prHref} className="suite-chip suite-chip-pr" title="送到 BELL PR 貢獻草稿">
-                      <span>送到 BELL PR</span>
-                      <ArrowUpRight size={12} />
-                    </a>
-                  )}
-
-                  <button
-                    type="button"
-                    className="btn-ghost"
-                    style={{ border: "none", padding: 4, cursor: "pointer" }}
-                    aria-label="刪除待辦"
-                    onClick={async () => {
-                      const next = await apiWrite<CampaignSnapshot>(
-                        `/api/todos/${td.id}?campaignId=${encodeURIComponent(snapshot.campaign.id)}`,
-                        "DELETE",
-                      );
-                      onSnapshot(next);
-                      notify("已刪除待辦");
-                    }}
-                  >
-                    <Trash2 size={14} />
-                  </button>
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      style={{ border: "none", padding: 4, cursor: "pointer" }}
+                      aria-label="刪除待辦"
+                      onClick={async () => {
+                        const next = await apiWrite<CampaignSnapshot>(
+                          `/api/todos/${td.id}?campaignId=${encodeURIComponent(snapshot.campaign.id)}`,
+                          "DELETE",
+                        );
+                        onSnapshot(next);
+                        notify("已刪除待辦");
+                      }}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
                 </div>
               );
             })
@@ -338,10 +319,12 @@ export function TasksView({
 // ── 2. Meetings Workspace (`#/meetings`) + Bidirectional Google Docs & HackMD ─
 export function MeetingsView({
   snapshot,
+  suiteLinks,
   onSnapshot,
   notify,
 }: {
   snapshot: CampaignSnapshot;
+  suiteLinks: SuiteLinks;
   onSnapshot: (next: CampaignSnapshot) => void;
   notify: (msg: string) => void;
 }) {
@@ -746,10 +729,25 @@ export function MeetingsView({
         </div>
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
             <button type="button" className="btn btn-sm" onClick={convertDecisionToTodo}>
               <span>將首條決議轉為待辦</span>
             </button>
+            <SuiteHandoffMenu
+              links={suiteLinks}
+              title={draft.title.trim() || "活動會議記錄"}
+              text={[
+                draft.title.trim() ? `會議：${draft.title.trim()}${draft.meetingDate ? `（${draft.meetingDate}）` : ""}` : "",
+                draft.attendees.trim() ? `與會：${draft.attendees.trim()}` : "",
+                draft.decisions.trim() ? `決議：\n${draft.decisions.trim()}` : "",
+                draft.agenda.trim() ? `大綱：\n${draft.agenda.trim()}` : "",
+                draft.precautions.trim() ? `注意事項：\n${draft.precautions.trim()}` : "",
+              ]
+                .filter(Boolean)
+                .join("\n\n")}
+              url={draft.docUrl.trim() || undefined}
+              back="#/meetings"
+            />
             {selectedId !== "new" && (
               <button
                 type="button"
@@ -1096,12 +1094,6 @@ export function NotesView({
     notify("已儲存個人筆記");
   }
 
-  const explainHref = explainDraftHref(
-    suiteLinks.explain,
-    { text: `${title}\n\n${body}`.trim(), title: title || "活動籌備筆記", back: "#/notes" },
-    window.location.hostname,
-  );
-
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16, alignItems: "start" }}>
       <div className="card" style={{ padding: 14, display: "flex", flexDirection: "column", gap: 8 }}>
@@ -1187,13 +1179,12 @@ export function NotesView({
             >
               <span>轉為組別待辦</span>
             </button>
-            {explainHref && (
-              <a href={explainHref} className="suite-chip suite-chip-explain">
-                <Sparkles size={12} />
-                <span>在 Explain 拆解概念</span>
-                <ArrowUpRight size={12} />
-              </a>
-            )}
+            <SuiteHandoffMenu
+              links={suiteLinks}
+              title={title.trim() || "活動籌備筆記"}
+              text={[title.trim(), body.trim()].filter(Boolean).join("\n\n")}
+              back="#/notes"
+            />
             {activeNote && (
               <button
                 type="button"

@@ -259,142 +259,140 @@ const BENCHMARK_LIBRARY: readonly BenchmarkTemplate[] = [
   {
     title: "DEF CON LiveCTF（拉斯維加斯／全球連線）",
     region: "國際",
-    category: "即時攻防解題與實況競賽",
+    category: "即時解題直播賽",
     keywords: /ctf|livectf|資安|出題|驗題|infra|靶機|競賽|賽制|輪次|pwn|web|crypto|reverse/i,
     baseScore: 89,
-    defaultWhy: "採即時輪次制的動態解題與容器化環境調度，高度考驗出題組與 Infra 組在題目隔離、Exploit 重播驗證與輪次節奏上的緊密配合。",
-    timelinePattern: "開賽前 12–16 週敲定輪次賽制與容器規格 → 倒數 6–8 週鎖定題目初稿與標準 Docker 映像檔 → 倒數 3–4 週完成跨人盲測互驗（Playtesting）與負載壓測。",
+    defaultWhy: "即時輪次解題與獨立靶機調度，直接對應出題組×網管組的容器規格與直播轉播節奏。",
+    timelinePattern: "T-12W 定賽制與容器規格 → T-7W 收齊題目與 Docker → T-4W 盲測驗題與 200 人壓測。",
     specialIdeas: [
-      "出題組與 Infra 組在開案第一個月先定訂統一的「Challenge Spec 模板（Dockerfile + healthcheck + 自動 exploit 測試腳本）」，避免賽前一週人工搬題出錯",
-      "針對新手友善度，可在 LiveCTF 輪次設計「破冰暖身題（Warm-up Round）+ 即時解題動態轉播面板」，讓全球觀眾與各校新手都有強烈參與感",
-      "賽後立即開源部分經典題目環境與官方 Writeup 徵集獎勵，延續各校資安社下學期讀書會教材價值",
+      "第一個月先定好「出題模板（Dockerfile + healthcheck + 自動解題腳本）」，免得賽前人工搬題出包",
+      "安排「破冰暖身題 + 即時解題轉播面板」，讓線上觀眾跟各校新手都有參與感",
+      "賽後開源部分題目與官方 Writeup，直接變各校下學期社課教材",
     ],
     pitfalls: [
-      "LiveCTF 最常踩坑的是「選手提交的測試容器未嚴格限制 CPU／PID／外網連線」，導致單一 fork bomb 或資源耗盡拖垮整台母機——Infra 組務必在 1 月驗題期實測 cgroup 與網路白名單",
-      "出題組自我驗題極易盲點漏看非預期解（Unintended Solution）——務必強制「非出題者盲測互驗」並在賽前 3 週凍結題目難度曲線",
+      "靶機沒鎖 CPU／PID／外網最容易被單一容器拖垮母機，驗題期一定要實測 cgroup 與禁外網",
+      "自己驗題很容易漏看非預期解，務必交叉盲測並在賽前 3 週鎖題",
     ],
   },
   {
-    title: "LakeCTF（EPFL 瑞士洛桑聯邦理工 · no-llm 政策）",
+    title: "LakeCTF（EPFL · no-llm 政策）",
     region: "國際",
-    category: "反 AI 自動解題與晉級制國際資安賽",
+    category: "防 AI 秒殺與晉級直播賽",
     keywords: /ctf|llm|agent|出題|網管|資安|淘汰|八強|十六強|直播|lakectf/i,
     baseScore: 88,
-    defaultWhy: "率先針對 LLM／AI Agent 自動解題制定公開規範（no-llm policy），並採緊湊晉級制取代過於冗長的循環賽，與今年零籌討論方向高度契合。",
-    timelinePattern: "開案定調 AI 使用邊界與晉級輪次 → 出題期實測主流 Agent 是否能一鍵秒解 → 賽前公告公平競賽條款與流量錄製聲明。",
+    defaultWhy: "率先公開 no-llm 規範並改採緊湊晉級制，跟零籌拍板的防 AI 與淘汰賽直播完全契合。",
+    timelinePattern: "開案定 AI 邊界與晉級輪次 → 出題期拿主流 Agent 實測 → 賽前公告規章與錄流量聲明。",
     specialIdeas: [
-      "與其單靠道德勸說禁用 LLM，不如在出題期加入「多步狀態互動、環境探索或即時對戰應變」設計，並由出題組先拿主流 Agent 實測過濾秒殺題",
-      "改採「初賽積分篩選 ＋ 16 強／8 強單敗或雙敗淘汰三天直播」，徹底解決零籌提到循環賽過於冗長、觀眾與選手疲乏的問題",
-      "為每隊注入專屬 Dynamic Flag 並搭配網管組 PCAP 流量留存，一旦抓到跨隊抄 Flag 或異常自動化掃描即可有憑有據仲裁",
+      "題目加入多步互動或環境探索，出題組交題前先拿主流 Agent 實測過濾秒殺題",
+      "改採「初賽積分篩選 ＋ 16強／8強淘汰三天直播」，避開循環賽太冗長、觀眾疲乏的問題",
+      "每隊配專屬 Dynamic Flag 加上 VPN 流量留存，抓抄題或異常掃描才有憑據仲裁",
     ],
     pitfalls: [
-      "若規章寫「禁用 AI」卻無技術驗證或題型區隔，守規矩的新手反而吃虧——建議明確界定「允許查語法／禁止全自動 Agent 掃描靶機」並搭配 Rate Limit",
-      "網管組錄製全場 VPN PCAP 流量時，若未設定 Ring Buffer 自動輪替與硬碟配額，極易在第二天塞爆磁碟導致 CTFd 與靶機全面當機",
+      "規章只寫禁用 AI 卻沒技術限制會讓老實人吃虧，要寫清楚「可查語法／禁全自動 Agent 掃靶機」並配 Rate Limit",
+      "全場錄 PCAP 沒設 Ring Buffer 輪替，第二天硬碟塞爆就會把 CTFd 跟靶機一起搞掛",
     ],
   },
   {
     title: "AIS3 EOF × 台灣跨校資安社聯合新手賽",
     region: "國內",
-    category: "跨校資安社群與雙軌資格賽",
+    category: "跨校資安社雙軌賽",
     keywords: /資安|社團|新手|跨校|聯合|ctf|領獎|資格|各校|廠商|贊助|學生/i,
     baseScore: 88,
-    defaultWhy: "同樣面向全台各校資安社社員並開放外部／國際隊伍同場切磋，需同時處理各校資格名單審核、企業贊助對接與寒假前後檔期避撞。",
-    timelinePattern: "11 月各校社團定檔並啟動廠商贊助企劃書 → 12 月開放雙軌報名與宣傳 → 1 月完成各校新手領獎資格審核與題庫互驗 → 2–3 月避開春節與大型年會正式開賽。",
+    defaultWhy: "同時開放全球隊伍參賽並保留籌備校新手專屬獎項，需對齊各校審資格、談贊助與寒假避撞期。",
+    timelinePattern: "11 月各校對檔期＆談贊助 → 12 月開放報名與社課宣傳 → 1 月審新手資格＆驗題 → 2–3 月開賽。",
     specialIdeas: [
-      "計分板內建「Global Open 總榜」與「籌備校資安社新手專屬領獎榜」雙視角切換，兼顧全球 100–200 隊競技熱度與國內 10–20 位社團新手的獲獎成就感",
-      "廠商贊助包可結合「企業冠名特色題／實習媒合履歷投遞通道」，大幅提高資安廠商在年底至年初編列贊助預算的意願",
-      "由各校資安社指派 1 名「校內審核聯絡人」，在 1 月底前透過統一表單核對社員學籍與新手年資，避免賽後領獎爭議",
+      "計分板分「Global 總榜」與「籌備校新手領獎榜」，兼顧國際熱度與社團新手破蛋成就感",
+      "贊助包結合「企業冠名題／實習履歷投遞通道」，年底談資安廠商預算更好推",
+      "五校各派 1 位社長／代表在 1 月底前核對社員學籍與新手身分，避免賽後領獎爭議",
     ],
     pitfalls: [
-      "2–3 月舉辦務必避開「農曆春節連假、1 月底學測、2 月中下旬開學選課週與 3 月初 SITCON 年會」及國際大型 CTF（如 DiceCTF／LA CTF）撞期週末",
-      "「新手資格」定義（例如：入社長度、是否曾於大型公開賽獲獎）若未在 12 月報名簡章寫死，賽後極易引發資格認定爭議",
+      "2–3 月務必避開春節、1 月中下旬學測、開學週、228 連假與 3 月初 SITCON 及國際大賽週末",
+      "「新手領獎資格」沒在 12 月報名簡章寫死，賽後一定吵翻",
     ],
   },
   {
     title: "COSCUP 開源人年會",
     region: "國內",
-    category: "多軌技術社群年會",
+    category: "志工跨組協作年會",
     keywords: /社群|年會|開源|技術|開發|議程|panel|與談|志工/i,
-    baseScore: 88,
-    defaultWhy: "同樣由兼職／志工團隊跨組協作推進，具備多軌議程、講者接待與現場高密度報到分流需求。",
-    timelinePattern: "倒數 8 週鎖定議程軌與桌長 → 倒數 4 週發佈講者行前手冊 → 倒數 2 週凍結印刷檔並執行志工線上行前說明會。",
+    baseScore: 85,
+    defaultWhy: "全志工跨組遠端協作，講究死線控管、贊助履約與行前手冊對齊。",
+    timelinePattern: "T-8W 鎖定議程與窗口 → T-4W 發出行前手冊 → T-2W 凍結印刷檔並辦工作人員說明會。",
     specialIdeas: [
-      "設計「講者與桌長專屬快速報到通道 + 休息室充電補給角」，大幅降低開場前講者迷路焦慮",
-      "在名牌背面直接印上「當日整點議程表與圓桌換桌動線 QR Code」，減少紙本手冊印量",
-      "會後 72 小時內釋出「閃電共筆精華包」，趁社群討論熱度最高時延續品牌聲量",
+      "一頁式行前手冊整合時程、聯絡窗口與報到動線，減少群組重複發問",
+      "賽後 72 小時內發佈精華回顧與感謝名單，趁熱度最高時累積下屆口碑",
     ],
     pitfalls: [
-      "切忌在活動前一週才收集講者投影片——務必在倒數 2 週收齊 PDF 備份檔，避免現場字型跑版或轉接頭不相容",
-      "報到開放入場前 25 分鐘會湧入 65% 人潮，若只設單一驗票口必排隊塞車，需拆成「奇偶手機末碼或預報到雙動線」",
+      "別等到最後一週才收講者或賽評簡報，T-2W 先收備份檔才不會現場跑版",
+      "尖峰時段報到或客服只開單一窗口必塞車，要預先分流",
     ],
   },
   {
     title: "Figma Config（舊金山／全球連線）",
     region: "國際",
-    category: "設計與產品跨域盛會",
+    category: "品牌視覺與社群互動",
     keywords: /設計|跨域|產品|工作坊|圓桌|世界咖啡館|體驗|品牌|交流/i,
-    baseScore: 85,
-    defaultWhy: "強調設計師與開發者跨界對話，重視高互動圓桌交流、主視覺一致性與精緻與會體驗。",
-    timelinePattern: "主視覺系統先行（T-6W 定調色票與模板）→ 分三波段釋出與談亮點（T-4W / T-2W / T-3D）維持報名熱度，避免單週資訊轟炸。",
+    baseScore: 83,
+    defaultWhy: "主視覺模板先行、分波段社群預熱，適合宣傳組與設計組拉高報名轉換率。",
+    timelinePattern: "T-6W 定主視覺與社群模板 → 分三波釋出亮點（T-4W／T-2W／T-3D）維持熱度。",
     specialIdeas: [
-      "進場領取「互動話題貼紙」（例如：我想聊 AI 協作／我在找副作用專案夥伴），讓中場休息破冰自然發生",
-      "Panel 與談預留最後 15 分鐘「即時 Slido 高票提問快問快答」，取代冗長開場致詞",
-      "每張交流圓桌鋪設可書寫海報紙與雙色麥克筆，討論結束直接拍照成為會後社群金句圖卡",
+      "先做好倒數圖、賽制懶人包與贊助 Logo 套版，宣傳組就能快速出圖不卡設計",
+      "中場穿插短訪談或即時解題快訊，取代冗長致詞",
     ],
     pitfalls: [
-      "圓桌討論與主舞台若在同一開放空間，音場極易互相干擾——需事先與音控確認指向性喇叭角度與換桌提示鈴聲",
-      "限量周邊或餐點若未標示素食／過敏原動線，午茶時段容易造成取餐回堵與素食夥伴撲空",
+      "周邊與印刷品沒算進春節工廠封關日，很容易趕不上活動日",
+      "多軌轉播或現場音場要提前測音量平衡，避免互相干擾",
     ],
   },
   {
     title: "SITCON 學生計算機年會",
     region: "國內",
-    category: "青年社群與議程共創",
+    category: "學生跨校招工與傳承",
     keywords: /學生|校園|青年|招工|志工|咖啡館|論壇|社群|工作坊/i,
     baseScore: 84,
-    defaultWhy: "高度仰賴招工表單招募跨校／跨領域夥伴，並設有深度交流的圓桌論壇與主題與談環節。",
-    timelinePattern: "招工表單採「隨到隨審 + 組長 15 分鐘輕量面談」，並在關鍵幹部請假／入伍／考試週前預留雙代理人交接週。",
+    defaultWhy: "同樣靠跨校學生招工與社團協作推進，特別需要注意期末考降載與雙人備援。",
+    timelinePattern: "招工隨到隨審拉進 DC 分組 → 期末考與學測週自動降載 → RC 週雙人演練交接。",
     specialIdeas: [
-      "為新加入的當日志工製作「一頁式口袋任務卡（含緊急聯絡電話與常見問題話術）」，5 分鐘即可上手",
-      "設置「白板許願／閃電講招募牆」，讓現場與會者也能貢獻 3 分鐘觀點",
+      "給新招工夥伴一頁式任務卡（含回報窗口與死線），5 分鐘就能上手",
+      "各組設副組長或雙人備援，有人卡考試或臨時有事也不會斷鏈",
     ],
     pitfalls: [
-      "避免將重要場控設備（如音控、直播、報到後台）壓在單一幹部身上——遇突發撞期或入伍請假時會瞬間斷鏈，務必在 RC 週完成雙人演練",
-      "撤場時段最容易人力流失，排班時應明確指定「撤場專責小組」並預留清點押金時間",
+      "把 OBS 轉播或靶機後台壓在單一幹部身上最危險，RC 週一定要做雙人演練",
+      "收尾核銷與寄獎最容易拖延，排班時要先指定結案負責人",
     ],
   },
   {
     title: "Slush Helsinki（芬蘭赫爾辛基）",
     region: "國際",
-    category: "高密度媒合與舞台策展",
+    category: "分鐘級控場與贊助體驗",
     keywords: /新創|媒合|黑客松|比賽|創投|展演|國際|論壇|demo/i,
     baseScore: 80,
-    defaultWhy: "以極高精準度的時間控場與志工體驗聞名，擅長在單日活動中平衡舞台內容與雙向交流密度。",
-    timelinePattern: "倒數 3 週鎖定全場分鐘級 Cue 表（Run-of-Show）→ 倒數 1 週只做走位與異常演練，不再新增企劃分支。",
+    defaultWhy: "以分鐘級 Run-of-Show 控場與贊助商結案報告聞名，適合轉播組與贊助組借鏡。",
+    timelinePattern: "T-3W 鎖定分鐘級導播 Cue 表 → T-1W 只做彩排與異常演練，不再加新功能。",
     specialIdeas: [
-      "設計「1 對 1 或 4 人微聚會預約角（Meeting Tables）」，編上醒目桌號方便與會者精準碰面",
-      "活動後第 1 週立即寄發「講者與合作廠商專屬致謝數據小卡（出席率、精彩側拍照）」，為下屆合作鋪路",
+      "轉播與場控共用同一份分鐘級 Cue 表，換場口播跟字卡才不會落拍",
+      "賽後第 1 週就寄出贊助商專屬數據小卡（觀看數、參賽校數、直播截圖），下屆續約率最高",
     ],
     pitfalls: [
-      "串場轉換若只留 3 分鐘，講者換麥克風與測試畫面必定超時並骨牌式拖垮下半場——每場之間至少留 8–10 分鐘緩衝",
-      "外燴與音響廠商共用貨梯時段若未錯開，早上進場會卡在卸貨區延誤彩排",
+      "換場只留 3 分鐘一定超時拖垮後面賽程，輪次切換至少留 8–10 分鐘緩衝",
+      "開賽前一週切忌臨時改賽制或加新外掛，穩住現有流程最重要",
     ],
   },
   {
     title: "白晝之夜 Nuit Blanche ／ 城市策展市集",
     region: "國際",
-    category: "展演市集與多點動線",
+    category: "多點場控與廠商調度",
     keywords: /市集|展覽|音樂|藝術|戶外|體驗|派對|文化|品牌/i,
     baseScore: 76,
-    defaultWhy: "多組攤位／展區同步運作，特別講究廠商進撤場時段管理、電力配置與現場臨時人力調度。",
-    timelinePattern: "T-5W 確認攤商與硬體電力規格 → T-2W 發放進撤場車證與動線圖 → 活動後 1 週完成場地復原與廠商請款核銷。",
+    defaultWhy: "多單位同步運作，重廠商規格確認、進撤場動線與請款統編收攏。",
+    timelinePattern: "T-5W 確認硬體規格 → T-2W 發動線與窗口懶人包 → W+1 完成請款核銷。",
     specialIdeas: [
-      "以「時段集章或任務連線」引導人流平均分佈至較內側的展桌，避免入口處過度擁擠",
-      "建立「廠商與臨時工即時回報群組置頂懶人包」，統一收攏貨梯位置、聯絡人與統編資訊",
+      "廠商與工作人員群組置頂一頁懶人包，統一收攏聯絡人、雲端資料夾與統編抬頭",
+      "用闖關或破蛋任務引導新手參與，避免熱度只集中少數強隊",
     ],
     pitfalls: [
-      "高功率餐飲設備（咖啡機、保溫爐）與舞台音響絕對不可接在同一迴路，否則活動中途極易跳電",
-      "戶外或半開放場館需在 T-3D 啟動雨備／冷氣動線備案確認",
+      "請款沒先對好學校代收或廠商直付統編，賽後重開發票會卡死核銷",
+      "現場或線上突發狀況要有單一仲裁窗口，避免多頭馬車",
     ],
   },
 ];
@@ -423,7 +421,7 @@ export function curateComparableEvents(input: {
     const similarityScore = Math.min(97, item.baseScore + boost);
     const matchedTeams = input.teamNames.slice(0, 2).join("、");
     const whySimilar = matchedTeams
-      ? `與「${input.name}」的${matchedTeams}編制高度呼應：${item.defaultWhy}`
+      ? `對應${matchedTeams}：${item.defaultWhy}`
       : item.defaultWhy;
     return {
       campaignId: input.campaignId,
@@ -440,4 +438,31 @@ export function curateComparableEvents(input: {
 
   scored.sort((a, b) => b.similarityScore - a.similarityScore);
   return scored.slice(0, 4);
+}
+
+const EXTENSION_MIME_MAP: Record<string, string> = {
+  md: "text/markdown",
+  markdown: "text/markdown",
+  txt: "text/plain",
+  log: "text/plain",
+  csv: "text/csv",
+  json: "application/json",
+  pdf: "application/pdf",
+  svg: "image/svg+xml",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+};
+
+export const SAFE_MIME_RE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+(?:[ \t]*;[\x20-\x7e]*)?$/i;
+
+export function inferUploadMimeType(fileName: string, reportedMimeType?: string): string {
+  const cleaned = (reportedMimeType ?? "").trim().toLowerCase();
+  if (cleaned && cleaned !== "application/octet-stream" && SAFE_MIME_RE.test(cleaned)) {
+    return cleaned;
+  }
+  const ext = fileName.trim().toLowerCase().split(".").pop() ?? "";
+  return EXTENSION_MIME_MAP[ext] ?? "application/octet-stream";
 }

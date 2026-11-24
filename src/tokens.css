@@ -73,6 +73,12 @@
   --amber-700: #8A5200;
   --red-400: #FF7873;
   --red-600: #B82824;
+
+  /* Export & Surface Constants */
+  --deck-stage-light: #E7E4DC;
+  --deck-stage-dark: var(--ink-950);
+  --sheet-paper: #FFFFFF;
+  --switch-thumb: #FFFFFF;
 }
 
 /* ── Light Mode (Default Crisp Architectural Surface) ─────────────────────── */
@@ -129,6 +135,14 @@
   --danger-bg: #FCECEB;
   --danger-line: rgba(184, 40, 36, .24);
 
+  /* Team Semantic Dots (WCAG >= 6.2:1 on Light Surface) */
+  --team-rose: var(--rose-600);
+  --team-violet: var(--violet-600);
+  --team-mint: var(--forest-700);
+  --team-amber: var(--amber-700);
+  --team-sky: var(--sky-700);
+  --team-terracotta: var(--terracotta-700);
+
   --focus: 0 0 0 2px var(--panel), 0 0 0 3.5px var(--rose-600);
 
   /* Suite Contract v1 Aliases */
@@ -172,7 +186,7 @@
   --campaign: var(--rose-400);
   --campaign-bright: var(--rose-300);
   --campaign-text: var(--rose-300);
-  --campaign-on: #FFFFFF;
+  --campaign-on: #111317;
   --campaign-tint: #2C1923;
   --campaign-line: rgba(242, 139, 180, .30);
 
@@ -197,7 +211,124 @@
   --danger-bg: #2F1A1B;
   --danger-line: rgba(255, 120, 115, .28);
 
+  /* Team Semantic Dots (WCAG >= 5.1:1 on Dark Surface) */
+  --team-rose: var(--rose-400);
+  --team-violet: var(--violet-300);
+  --team-mint: var(--forest-300);
+  --team-amber: var(--amber-300);
+  --team-sky: var(--sky-300);
+  --team-terracotta: var(--terracotta-300);
+
   --focus: 0 0 0 2px var(--panel), 0 0 0 3.5px var(--rose-300);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --chrome: var(--ink-950);
+    --panel: var(--ink-900);
+    --raised: var(--ink-800);
+    --raised-2: var(--ink-750);
+    --action-bg: #232730;
+    --action-hover: #2C313D;
+    --overlay: #181B21;
+
+    --text: #F5F6F8;
+    --text-2: #B8BCC6;
+    --text-3: #8A8F9A;
+    --text-4: #5E636E;
+
+    --line: rgba(255, 255, 255, .085);
+    --line-2: rgba(255, 255, 255, .15);
+    --fill-hover: rgba(255, 255, 255, .05);
+    --fill-active: rgba(255, 255, 255, .085);
+    --scrim: rgba(4, 5, 7, .68);
+
+    --shadow-card: inset 0 1px 0 rgba(255, 255, 255, .05), 0 2px 8px -2px rgba(0, 0, 0, .45);
+    --shadow-pop: 0 0 0 1px rgba(255, 255, 255, .11), 0 20px 50px -10px rgba(0, 0, 0, .82);
+
+    --campaign: var(--rose-400);
+    --campaign-bright: var(--rose-300);
+    --campaign-text: var(--rose-300);
+    --campaign-on: #111317;
+    --campaign-tint: #2C1923;
+    --campaign-line: rgba(242, 139, 180, .30);
+
+    --personal-text: var(--terracotta-300);
+    --personal-tint: #2B1F1A;
+    --explain-text: var(--violet-300);
+    --explain-tint: #211E34;
+    --pr-text: var(--forest-300);
+    --pr-tint: #162B23;
+    --reader-text: var(--sky-300);
+    --reader-tint: #162636;
+
+    --ok: var(--forest-300);
+    --ok-bg: #162B23;
+    --ok-line: rgba(70, 217, 146, .28);
+    --warn: var(--amber-300);
+    --warn-bg: #2D2314;
+    --warn-line: rgba(245, 184, 81, .30);
+    --danger: var(--red-400);
+    --danger-bg: #2F1A1B;
+    --danger-line: rgba(255, 120, 115, .28);
+
+    --team-rose: var(--rose-400);
+    --team-violet: var(--violet-300);
+    --team-mint: var(--forest-300);
+    --team-amber: var(--amber-300);
+    --team-sky: var(--sky-300);
+    --team-terracotta: var(--terracotta-300);
+
+    --focus: 0 0 0 2px var(--panel), 0 0 0 3.5px var(--rose-300);
+  }
+}
+
+/* ── Export Deck Dual-Theme Tokens ────────────────────────────────────────── */
+.dk-root {
+  --dk-paper: #FAF9F6;
+  --dk-card: #FFFFFF;
+  --dk-well: #F2F0EA;
+  --dk-line: #E4E1D9;
+  --dk-text-1: #14161B;
+  --dk-text-2: #494E59;
+  --dk-text-3: #5F6572;
+  --dk-brand: var(--rose-600);
+  --dk-brand-soft: #F9ECF1;
+  --dk-brand-line: #E6BDCE;
+  --dk-warn: var(--amber-700);
+  --dk-warn-soft: #FDF3E4;
+  --dk-ok: #26785A;
+  --dk-bar: var(--rose-600);
+  --dk-team-rose: var(--rose-600);
+  --dk-team-violet: var(--violet-600);
+  --dk-team-mint: var(--forest-700);
+  --dk-team-amber: var(--amber-700);
+  --dk-team-sky: var(--sky-700);
+  --dk-team-terracotta: var(--terracotta-700);
+}
+
+.dk-root[data-deck-theme="dark"] {
+  --dk-paper: #111318;
+  --dk-card: var(--ink-800);
+  --dk-well: var(--ink-850);
+  --dk-line: var(--ink-700);
+  --dk-text-1: #F3F4F8;
+  --dk-text-2: #B8BECC;
+  --dk-text-3: #8A8F9A;
+  --dk-brand: var(--rose-400);
+  --dk-brand-soft: #2C1923;
+  --dk-brand-line: rgba(242, 139, 180, .30);
+  --dk-warn: var(--amber-300);
+  --dk-warn-soft: #2D2314;
+  --dk-ok: var(--forest-300);
+  --dk-bar: var(--rose-400);
+  --dk-team-rose: var(--rose-400);
+  --dk-team-violet: var(--violet-300);
+  --dk-team-mint: var(--forest-300);
+  --dk-team-amber: var(--amber-300);
+  --dk-team-sky: var(--sky-300);
+  --dk-team-terracotta: var(--terracotta-300);
 }
 
 @media (prefers-reduced-motion: reduce) {

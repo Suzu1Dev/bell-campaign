@@ -7,11 +7,15 @@ import {
   APPLICANT_ROLES,
   APPLICANT_STATUSES,
   CELL_STAGES,
+  DEFAULT_PONYTAIL_MODE,
+  DEFAULT_THINKING_EFFORT,
   FILE_CATEGORIES,
   PACING_LEVELS,
   PARTNER_KINDS,
   PARTNER_STATUSES,
+  PONYTAIL_MODES,
   TEAM_COLORS,
+  THINKING_EFFORTS,
   type AiProvider,
   type ApplicantRole,
   type ApplicantStatus,
@@ -38,13 +42,15 @@ import {
   type PacingLevel,
   type PartnerKind,
   type PartnerStatus,
+  type PonytailMode,
   type ProviderSettings,
   type ScheduleCell,
   type TeamColor,
   type TempStaffTask,
+  type ThinkingEffort,
   type WeekEventItem,
 } from "../shared/types.js";
-import { curateComparableEvents } from "../shared/docs.js";
+import { curateComparableEvents, inferUploadMimeType } from "../shared/docs.js";
 import {
   buildWeeklyTimelineDefs,
   defaultWeekStage,
@@ -57,6 +63,9 @@ import { AppError } from "./errors.js";
 const DEFAULT_SETTINGS: ProviderSettings = {
   provider: "builtin",
   model: "",
+  ponytailMode: DEFAULT_PONYTAIL_MODE,
+  thinkingEffort: DEFAULT_THINKING_EFFORT,
+  botAutoApply: true,
 };
 
 const SAMPLE_SOCIAL_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
@@ -1228,9 +1237,21 @@ export class CampaignStore {
       parsed.provider && (AI_PROVIDERS as readonly string[]).includes(parsed.provider)
         ? parsed.provider
         : DEFAULT_SETTINGS.provider;
+    const ponytailMode: PonytailMode =
+      parsed.ponytailMode && (PONYTAIL_MODES as readonly string[]).includes(parsed.ponytailMode)
+        ? parsed.ponytailMode
+        : DEFAULT_SETTINGS.ponytailMode;
+    const thinkingEffort: ThinkingEffort =
+      parsed.thinkingEffort && (THINKING_EFFORTS as readonly string[]).includes(parsed.thinkingEffort)
+        ? parsed.thinkingEffort
+        : DEFAULT_SETTINGS.thinkingEffort;
+    const botAutoApply = typeof parsed.botAutoApply === "boolean" ? parsed.botAutoApply : DEFAULT_SETTINGS.botAutoApply;
     return {
       provider,
       model: typeof parsed.model === "string" ? parsed.model : "",
+      ponytailMode,
+      thinkingEffort,
+      botAutoApply,
     };
   }
 
@@ -1239,6 +1260,9 @@ export class CampaignStore {
       ...this.getSettings(),
       ...(patch.provider !== undefined ? { provider: patch.provider } : {}),
       ...(patch.model !== undefined ? { model: patch.model.trim() } : {}),
+      ...(patch.ponytailMode !== undefined ? { ponytailMode: patch.ponytailMode } : {}),
+      ...(patch.thinkingEffort !== undefined ? { thinkingEffort: patch.thinkingEffort } : {}),
+      ...(patch.botAutoApply !== undefined ? { botAutoApply: patch.botAutoApply } : {}),
     };
     this.db
       .prepare("INSERT INTO settings (key, value) VALUES ('provider', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
@@ -1873,7 +1897,7 @@ export class CampaignStore {
         | "sheetUrl"
         | "slidesUrl"
       >
-    >,
+    > & { cascadeRename?: boolean },
   ): CampaignMeta {
     const snap = this.getSnapshot(campaignId);
     const cur = snap.campaign;
@@ -1894,27 +1918,73 @@ export class CampaignStore {
       updatedAt: now,
     };
 
-    this.db
-      .prepare(
-        `UPDATE campaigns
-         SET name = ?, subtitle = ?, brief = ?, event_date = ?, date_tentative = ?, tentative_note = ?, pacing = ?, main_goal = ?, monthly_goals_json = ?, sheet_url = ?, slides_url = ?, updated_at = ?
-         WHERE id = ?`,
-      )
-      .run(
-        next.name,
-        next.subtitle,
-        next.brief,
-        next.eventDate,
-        next.dateTentative ? 1 : 0,
-        next.tentativeNote,
-        next.pacing,
-        next.mainGoal,
-        JSON.stringify(next.monthlyGoals),
-        next.sheetUrl,
-        next.slidesUrl,
-        now,
-        campaignId,
-      );
+    this.db.exec("SAVEPOINT sp_camp_meta");
+    try {
+      this.db
+        .prepare(
+          `UPDATE campaigns
+           SET name = ?, subtitle = ?, brief = ?, event_date = ?, date_tentative = ?, tentative_note = ?, pacing = ?, main_goal = ?, monthly_goals_json = ?, sheet_url = ?, slides_url = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          next.name,
+          next.subtitle,
+          next.brief,
+          next.eventDate,
+          next.dateTentative ? 1 : 0,
+          next.tentativeNote,
+          next.pacing,
+          next.mainGoal,
+          JSON.stringify(next.monthlyGoals),
+          next.sheetUrl,
+          next.slidesUrl,
+          now,
+          campaignId,
+        );
+
+      if (next.name !== cur.name && cur.name.trim().length >= 2) {
+        const oldName = cur.name.trim();
+        const newName = next.name;
+        this.db
+          .prepare("UPDATE inspirations SET why_similar = REPLACE(why_similar, ?, ?), updated_at = ? WHERE campaign_id = ?")
+          .run(oldName, newName, now, campaignId);
+
+        if (patch.cascadeRename) {
+          this.db
+            .prepare(
+              "UPDATE forms SET title = REPLACE(title, ?, ?), description = REPLACE(description, ?, ?), updated_at = ? WHERE campaign_id = ?",
+            )
+            .run(oldName, newName, oldName, newName, now, campaignId);
+          this.db
+            .prepare(
+              "UPDATE meetings SET title = REPLACE(title, ?, ?), agenda = REPLACE(agenda, ?, ?), arrangements = REPLACE(arrangements, ?, ?), precautions = REPLACE(precautions, ?, ?), decisions = REPLACE(decisions, ?, ?), updated_at = ? WHERE campaign_id = ?",
+            )
+            .run(oldName, newName, oldName, newName, oldName, newName, oldName, newName, oldName, newName, now, campaignId);
+          this.db
+            .prepare(
+              "UPDATE files SET title = REPLACE(title, ?, ?), file_name = REPLACE(file_name, ?, ?), content_md = REPLACE(content_md, ?, ?), updated_at = ? WHERE campaign_id = ?",
+            )
+            .run(oldName, newName, oldName, newName, oldName, newName, now, campaignId);
+          this.db
+            .prepare(
+              "UPDATE notes SET title = REPLACE(title, ?, ?), body = REPLACE(body, ?, ?), updated_at = ? WHERE campaign_id = ?",
+            )
+            .run(oldName, newName, oldName, newName, now, campaignId);
+          this.db
+            .prepare("UPDATE todos SET title = REPLACE(title, ?, ?), updated_at = ? WHERE campaign_id = ?")
+            .run(oldName, newName, now, campaignId);
+          this.db
+            .prepare("UPDATE bot_messages SET content = REPLACE(content, ?, ?) WHERE campaign_id = ?")
+            .run(oldName, newName, campaignId);
+        }
+      }
+      this.db.exec("RELEASE SAVEPOINT sp_camp_meta");
+    } catch (err) {
+      this.db.exec("ROLLBACK TO SAVEPOINT sp_camp_meta");
+      this.db.exec("RELEASE SAVEPOINT sp_camp_meta");
+      throw err;
+    }
+
     return next;
   }
 
@@ -2002,13 +2072,31 @@ export class CampaignStore {
 
   addTeam(
     campaignId: string,
-    input: { name: string; lead?: string; color?: TeamColor; targetHeadcount?: number },
+    input: { name: string; lead?: string; color?: TeamColor; targetHeadcount?: number; afterTeamId?: string },
   ): CampaignTeam {
-    const maxRow = this.db
-      .prepare("SELECT COALESCE(MAX(order_index), -1) AS max_idx FROM teams WHERE campaign_id = ?")
-      .get(campaignId) as { max_idx: number };
     const id = `tm-${randomUUID().slice(0, 8)}`;
-    const orderIndex = maxRow.max_idx + 1;
+    let orderIndex: number;
+    if (input.afterTeamId) {
+      const anchor = this.db
+        .prepare("SELECT order_index FROM teams WHERE id = ? AND campaign_id = ?")
+        .get(input.afterTeamId, campaignId) as { order_index: number } | undefined;
+      if (anchor) {
+        orderIndex = anchor.order_index + 1;
+        this.db
+          .prepare("UPDATE teams SET order_index = order_index + 1 WHERE campaign_id = ? AND order_index >= ?")
+          .run(campaignId, orderIndex);
+      } else {
+        const maxRow = this.db
+          .prepare("SELECT COALESCE(MAX(order_index), -1) AS max_idx FROM teams WHERE campaign_id = ?")
+          .get(campaignId) as { max_idx: number };
+        orderIndex = maxRow.max_idx + 1;
+      }
+    } else {
+      const maxRow = this.db
+        .prepare("SELECT COALESCE(MAX(order_index), -1) AS max_idx FROM teams WHERE campaign_id = ?")
+        .get(campaignId) as { max_idx: number };
+      orderIndex = maxRow.max_idx + 1;
+    }
     const color = input.color ?? TEAM_COLORS[orderIndex % TEAM_COLORS.length];
     const targetHeadcount = Math.max(1, Math.min(100, input.targetHeadcount ?? 5));
     this.db
@@ -2203,8 +2291,9 @@ export class CampaignStore {
       diskPath = join(this.uploadDir, `${id}${safeExt}`);
       writeFileSync(diskPath, input.bytes);
     }
+    const resolvedMime = inferUploadMimeType(input.fileName, input.mimeType);
     const inlineText =
-      input.mimeType.startsWith("text/") || input.mimeType === "application/json"
+      resolvedMime.startsWith("text/") || resolvedMime === "application/json"
         ? input.bytes.toString("utf8").slice(0, 80_000)
         : "";
 
@@ -2219,7 +2308,7 @@ export class CampaignStore {
         input.title.trim(),
         input.category,
         input.teamId ?? null,
-        input.mimeType,
+        resolvedMime,
         input.fileName,
         diskPath,
         input.bytes.byteLength,
@@ -2235,7 +2324,7 @@ export class CampaignStore {
       category: input.category,
       teamId: input.teamId ?? null,
       kind: "upload",
-      mimeType: input.mimeType,
+      mimeType: resolvedMime,
       fileName: input.fileName,
       sizeBytes: input.bytes.byteLength,
       contentMd: inlineText,
@@ -2935,15 +3024,16 @@ export class CampaignStore {
     return { id, campaignId, role, content, proposals, createdAt: now };
   }
 
-  markProposalApplied(messageId: string, proposalId: string): BotActionProposal {
+  markProposalApplied(messageId: string, proposalId: string): { proposal: BotActionProposal; alreadyApplied: boolean } {
     const row = this.db.prepare("SELECT * FROM bot_messages WHERE id = ?").get(messageId) as Record<string, unknown> | undefined;
     if (!row) throw new AppError(404, "找不到指定的助理對話訊息。");
     const proposals = safeJsonParse<BotActionProposal[]>(String(row.proposals_json ?? "[]"), []);
     const target = proposals.find((p) => p.id === proposalId);
     if (!target) throw new AppError(404, "找不到指定的操作建議。");
+    const alreadyApplied = Boolean(target.applied);
     target.applied = true;
     this.db.prepare("UPDATE bot_messages SET proposals_json = ? WHERE id = ?").run(JSON.stringify(proposals), messageId);
-    return target;
+    return { proposal: target, alreadyApplied };
   }
 
   close(): void {

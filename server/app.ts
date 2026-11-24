@@ -15,10 +15,16 @@ import {
   PACING_LEVELS,
   PARTNER_KINDS,
   PARTNER_STATUSES,
+  PONYTAIL_MODES,
   TEAM_COLORS,
+  THINKING_EFFORTS,
+  type BotActionProposal,
+  type CellStage,
   type MeetingDocSource,
+  type TeamColor,
 } from "../shared/types.js";
 import {
+  SAFE_MIME_RE,
   detectDocSourceFromUrl,
   meetingToGoogleDocHtml,
   meetingToHackMd,
@@ -40,9 +46,13 @@ import {
   computeCampaignMetrics,
   matrixToCsvBom,
 } from "../shared/sheets.js";
+import { buildStandalonePresentationHtml } from "../shared/exporters.js";
+import { buildCampaignXlsxBuffer } from "./xlsx.js";
 import {
   buildBuiltinHandbook,
+  cleanSplitOriginTeamName,
   curateInspirationsWithAI,
+  escapeRegExp,
   generateAutoSchedulePreview,
   generateHandbookWithAI,
   replyCampaignBot,
@@ -155,6 +165,9 @@ const settingsPatchSchema = z
   .object({
     provider: z.enum(AI_PROVIDERS).optional(),
     model: z.string().max(160).optional(),
+    ponytailMode: z.enum(PONYTAIL_MODES).optional(),
+    thinkingEffort: z.enum(THINKING_EFFORTS).optional(),
+    botAutoApply: z.boolean().optional(),
   })
   .strict();
 
@@ -188,6 +201,7 @@ const patchCampaignSchema = z
       .optional(),
     sheetUrl: z.string().max(500).optional(),
     slidesUrl: z.string().max(500).optional(),
+    cascadeRename: z.boolean().optional(),
   })
   .strict();
 
@@ -297,7 +311,7 @@ const uploadFileSchema = z
     category: z.enum(FILE_CATEGORIES),
     teamId: z.string().trim().nullable().optional(),
     fileName: z.string().trim().min(1).max(140),
-    mimeType: z.string().trim().min(1).max(100),
+    mimeType: z.string().trim().min(1).max(100).regex(SAFE_MIME_RE),
     dataBase64: z.string().min(1).max(11_500_000),
   })
   .strict();
@@ -308,7 +322,7 @@ const saveDocSchema = z
     title: z.string().trim().min(1).max(120),
     category: z.enum(FILE_CATEGORIES).optional(),
     teamId: z.string().trim().nullable().optional(),
-    contentMd: z.string().min(1).max(80_000),
+    contentMd: z.string().trim().min(1).max(80_000),
     templateKind: z.enum(HANDBOOK_TEMPLATES).nullable().optional(),
   })
   .strict();
@@ -700,12 +714,37 @@ export function createApp(options: CreateAppOptions) {
     }
   });
 
+  app.get("/api/campaigns/:id/export.xlsx", (req, res) => {
+    const snap = store.getSnapshot(req.params.id);
+    const xlsxBuf = buildCampaignXlsxBuffer(snap);
+    const safeSlug = snap.campaign.name.replace(/[\\/:*?"<>|\s]+/g, "-").slice(0, 36) || snap.campaign.id;
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="bell-campaign-${snap.campaign.id}.xlsx"; filename*=UTF-8''${encodeURIComponent(`${safeSlug}-時程規劃表.xlsx`)}`,
+    );
+    res.send(xlsxBuf);
+  });
+
   app.get("/api/campaigns/:id/export.csv", (req, res) => {
     const snap = store.getSnapshot(req.params.id);
     const csv = matrixToCsvBom(buildGoogleSheetMatrix(snap));
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="bell-campaign-${snap.campaign.id}.csv"`);
     res.send(csv);
+  });
+
+  app.get("/api/campaigns/:id/export-deck.html", (req, res) => {
+    const snap = store.getSnapshot(req.params.id);
+    const theme = req.query.theme === "dark" ? "dark" : "light";
+    const html = buildStandalonePresentationHtml(snap, theme);
+    const safeSlug = snap.campaign.name.replace(/[\\/:*?"<>|\s]+/g, "-").slice(0, 36) || snap.campaign.id;
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="bell-campaign-${snap.campaign.id}-deck.html"; filename*=UTF-8''${encodeURIComponent(`${safeSlug}-專案簡報.html`)}`,
+    );
+    res.send(html);
   });
 
   app.get("/api/campaigns/:id/export.html", (req, res) => {
@@ -836,10 +875,17 @@ export function createApp(options: CreateAppOptions) {
 
   app.get("/api/files/:fileId/raw", (req, res) => {
     const raw = store.getRawFileBytes(req.params.fileId);
-    res.setHeader("Content-Type", raw.mimeType);
-    res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; sandbox");
+    const isPdf = raw.mimeType === "application/pdf" || /\.pdf$/i.test(raw.fileName);
+    res.setHeader("Content-Type", isPdf ? "application/pdf" : raw.mimeType);
     if (req.query.download === "1") {
+      res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; sandbox");
       res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(raw.fileName)}"`);
+    } else if (isPdf && req.query.inline === "1") {
+      res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(raw.fileName)}"`);
+      res.setHeader("X-Frame-Options", "SAMEORIGIN");
+      res.setHeader("Content-Security-Policy", "default-src 'self'; object-src 'self'; frame-ancestors 'self'");
+    } else {
+      res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; sandbox");
     }
     res.send(raw.bytes);
   });
@@ -1052,50 +1098,77 @@ export function createApp(options: CreateAppOptions) {
   });
 
   // ── Campaign Bot (`#/bot`) ───────────────────────────────────────────────
-  app.post("/api/campaigns/:id/bot/chat", async (req, res) => {
-    const parsed = botChatSchema.safeParse(req.body);
-    if (!parsed.success) throw new AppError(400, "請輸入想請 Campaign Bot 協助的內容。");
-    const campaignId = req.params.id;
-    const snap = store.getSnapshot(campaignId);
-    store.appendBotMessage(campaignId, "user", parsed.data.message);
+  const DESTRUCTIVE_BOT_KINDS = new Set(["delete_team", "delete_todo"]);
 
-    const controller = new AbortController();
-    const onClose = () => {
-      if (!res.writableEnded) controller.abort();
-    };
-    res.on("close", onClose);
-    try {
-      const reply = await replyCampaignBot(snap, parsed.data.message, snap.settings, controller.signal, aiRunner);
-      store.appendBotMessage(campaignId, "assistant", reply.content, reply.proposals);
-      res.json(store.getSnapshot(campaignId));
-    } finally {
-      res.off("close", onClose);
+  function resolveBotTeam(
+    snap: ReturnType<CampaignStore["getSnapshot"]>,
+    teamIdRaw: unknown,
+    teamNameRaw: unknown,
+  ) {
+    const idStr = typeof teamIdRaw === "string" ? teamIdRaw.trim() : "";
+    if (idStr) {
+      const byId = snap.teams.find((t) => t.id === idStr);
+      if (byId) return byId;
     }
-  });
+    const nameStr = typeof teamNameRaw === "string" ? teamNameRaw.trim() : "";
+    if (nameStr) {
+      return (
+        snap.teams.find((t) => t.name === nameStr) ??
+        snap.teams.find((t) => t.name.includes(nameStr) || nameStr.includes(t.name))
+      );
+    }
+    return undefined;
+  }
 
-  app.post("/api/campaigns/:id/bot/apply", (req, res) => {
-    const parsed = botApplySchema.safeParse(req.body);
-    if (!parsed.success) throw new AppError(400, "操作建議識別碼格式不正確。");
-    const campaignId = req.params.id;
+  function resolveBotWeek(
+    snap: ReturnType<CampaignStore["getSnapshot"]>,
+    weekIdRaw: unknown,
+    countdownRaw?: unknown,
+  ) {
+    const idStr = typeof weekIdRaw === "string" ? weekIdRaw.trim() : "";
+    if (idStr) {
+      const byId = snap.weeks.find((w) => w.id === idStr);
+      if (byId) return byId;
+    }
+    const cdStr = typeof countdownRaw === "string" ? countdownRaw.trim() : "";
+    if (cdStr) {
+      return snap.weeks.find((w) => w.countdownLabel === cdStr || w.dateRange.includes(cdStr));
+    }
+    return undefined;
+  }
+
+  function executeBotProposal(campaignId: string, proposal: BotActionProposal): void {
     const snap = store.getSnapshot(campaignId);
-    const proposal = store.markProposalApplied(parsed.data.messageId, parsed.data.proposalId);
     const p = proposal.payload;
 
-    if (proposal.kind === "setup_project_brief") {
-      const brief = String(p.brief ?? "").trim();
-      const mainGoal = String(p.mainGoal ?? brief).trim();
+    if (proposal.kind === "setup_project_brief" || proposal.kind === "update_campaign") {
+      const nextName = typeof p.name === "string" && p.name.trim() ? p.name.trim() : undefined;
+      const brief = typeof p.brief === "string" && p.brief.trim() ? p.brief.trim() : undefined;
+      const mainGoal =
+        typeof p.mainGoal === "string" && p.mainGoal.trim()
+          ? p.mainGoal.trim()
+          : proposal.kind === "setup_project_brief" && brief
+            ? brief
+            : undefined;
       store.updateCampaignMeta(campaignId, {
-        ...(brief ? { brief } : {}),
-        ...(mainGoal ? { mainGoal } : {}),
+        ...(nextName ? { name: nextName, cascadeRename: p.cascadeRename !== false } : {}),
+        ...(typeof p.subtitle === "string" ? { subtitle: p.subtitle.trim() } : {}),
+        ...(brief !== undefined ? { brief } : {}),
+        ...(mainGoal !== undefined ? { mainGoal } : {}),
+        ...(typeof p.eventDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(p.eventDate) ? { eventDate: p.eventDate } : {}),
+        ...(typeof p.dateTentative === "boolean" ? { dateTentative: p.dateTentative } : {}),
+        ...(typeof p.tentativeNote === "string" ? { tentativeNote: p.tentativeNote } : {}),
       });
-      const updatedSnap = store.getSnapshot(campaignId);
-      store.seedInspirationsForCampaign(campaignId, {
-        name: updatedSnap.campaign.name,
-        subtitle: updatedSnap.campaign.subtitle,
-        brief: updatedSnap.campaign.brief,
-        mainGoal: updatedSnap.campaign.mainGoal,
-        teamNames: updatedSnap.teams.map((t) => t.name),
-      });
+      if (brief) {
+        const updatedSnap = store.getSnapshot(campaignId);
+        store.seedInspirationsForCampaign(campaignId, {
+          name: updatedSnap.campaign.name,
+          subtitle: updatedSnap.campaign.subtitle,
+          brief: updatedSnap.campaign.brief,
+          mainGoal: updatedSnap.campaign.mainGoal,
+          teamNames: updatedSnap.teams.map((t) => t.name),
+        });
+      }
     } else if (proposal.kind === "reschedule_timeline") {
       store.rescheduleCampaignTimeline(campaignId, {
         ...(typeof p.eventDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(p.eventDate) ? { eventDate: p.eventDate } : {}),
@@ -1105,19 +1178,159 @@ export function createApp(options: CreateAppOptions) {
         ...(typeof p.dateTentative === "boolean" ? { dateTentative: p.dateTentative } : {}),
         ...(typeof p.tentativeNote === "string" ? { tentativeNote: p.tentativeNote } : {}),
       });
+    } else if (proposal.kind === "create_team") {
+      const name = String(p.name ?? "").trim();
+      if (name && !snap.teams.some((t) => t.name === name)) {
+        const color = (TEAM_COLORS as readonly string[]).includes(String(p.color))
+          ? (String(p.color) as TeamColor)
+          : undefined;
+        store.addTeam(campaignId, {
+          name,
+          lead: typeof p.lead === "string" ? p.lead : "",
+          color,
+          targetHeadcount: typeof p.targetHeadcount === "number" ? p.targetHeadcount : 4,
+        });
+      }
+    } else if (proposal.kind === "update_team") {
+      const target = resolveBotTeam(snap, p.teamId, p.teamName);
+      if (target) {
+        const color = (TEAM_COLORS as readonly string[]).includes(String(p.color))
+          ? (String(p.color) as TeamColor)
+          : undefined;
+        store.updateTeam(target.id, {
+          ...(typeof p.name === "string" && p.name.trim() ? { name: p.name.trim() } : {}),
+          ...(typeof p.lead === "string" ? { lead: p.lead } : {}),
+          ...(color ? { color } : {}),
+          ...(typeof p.targetHeadcount === "number" ? { targetHeadcount: p.targetHeadcount } : {}),
+        });
+      }
+    } else if (proposal.kind === "split_team") {
+      const newTeamName = String(p.newTeamName ?? p.name ?? "").trim();
+      if (!newTeamName) return;
+      const stem = newTeamName.replace(/組$/, "").trim();
+      const fromTeam =
+        resolveBotTeam(snap, p.fromTeamId, p.fromTeamName) ??
+        snap.teams.find((t) => t.name !== newTeamName && stem && t.name.includes(stem));
+
+      const color = (TEAM_COLORS as readonly string[]).includes(String(p.newColor))
+        ? (String(p.newColor) as TeamColor)
+        : "sky";
+      const existingNew = snap.teams.find((t) => t.name === newTeamName);
+      const createdTeam =
+        existingNew ??
+        store.addTeam(campaignId, {
+          name: newTeamName,
+          lead: typeof p.newLead === "string" ? p.newLead : "",
+          color,
+          targetHeadcount: typeof p.newHeadcount === "number" ? p.newHeadcount : 4,
+          ...(fromTeam ? { afterTeamId: fromTeam.id } : {}),
+        });
+
+      if (fromTeam && fromTeam.id !== createdTeam.id) {
+        const escapedStem = escapeRegExp(stem);
+        const autoRenamed =
+          typeof p.renameFromTo === "string" && p.renameFromTo.trim()
+            ? p.renameFromTo.trim()
+            : cleanSplitOriginTeamName(fromTeam.name, stem);
+        store.updateTeam(fromTeam.id, {
+          name: autoRenamed,
+          ...(typeof p.fromHeadcount === "number" ? { targetHeadcount: p.fromHeadcount } : {}),
+        });
+
+        const explicitIds = new Set(Array.isArray(p.moveTodoIds) ? p.moveTodoIds.map(String) : []);
+        const rawKw =
+          typeof p.moveKeyword === "string" && p.moveKeyword.trim()
+            ? p.moveKeyword.trim()
+            : stem === "轉播"
+              ? "轉播|直播|導播|OBS|賽評|16強|8強"
+              : escapedStem;
+        let kwRegex: RegExp | null = null;
+        if (rawKw) {
+          try {
+            kwRegex = new RegExp(rawKw, "i");
+          } catch {
+            kwRegex = new RegExp(escapeRegExp(rawKw), "i");
+          }
+        }
+        const movedTodos = snap.todos.filter(
+          (td) =>
+            explicitIds.has(td.id) ||
+            (td.teamId === fromTeam.id && kwRegex !== null && kwRegex.test(td.title)),
+        );
+        const touchedWeeks = new Set<string>();
+        for (const td of movedTodos) {
+          store.updateTodo(td.id, { teamId: createdTeam.id });
+          if (td.weekId) touchedWeeks.add(td.weekId);
+        }
+        for (const wkId of touchedWeeks) {
+          const wk = snap.weeks.find((w) => w.id === wkId);
+          const wkTodos = movedTodos.filter((t) => t.weekId === wkId);
+          const srcCell = snap.cells.find((c) => c.weekId === wkId && c.teamId === fromTeam.id);
+          store.upsertCell({
+            weekId: wkId,
+            teamId: createdTeam.id,
+            stage: srcCell?.stage ?? wk?.stage ?? "進度50%",
+            weeklyFocus: wkTodos[0]?.title.slice(0, 24) ?? srcCell?.weeklyFocus ?? `${newTeamName}推進`,
+            crossTeam: srcCell?.crossTeam ?? "",
+          });
+        }
+        if (kwRegex) {
+          for (const pt of snap.partners) {
+            if (pt.teamId === fromTeam.id && kwRegex.test(`${pt.roleOrTopic} ${pt.notes}`)) {
+              store.patchPartner(pt.id, { teamId: createdTeam.id });
+            }
+          }
+        }
+      }
+    } else if (proposal.kind === "delete_team") {
+      const target = resolveBotTeam(snap, p.teamId, p.teamName);
+      if (target && snap.teams.length > 1) {
+        store.deleteTeam(target.id);
+      }
     } else if (proposal.kind === "add_partner") {
       const kind = (PARTNER_KINDS as readonly string[]).includes(String(p.kind))
         ? (String(p.kind) as typeof PARTNER_KINDS[number])
         : "speaker";
+      const targetTeam = resolveBotTeam(snap, p.teamId, p.teamName) ?? snap.teams[0];
+      const status = (PARTNER_STATUSES as readonly string[]).includes(String(p.status))
+        ? (String(p.status) as typeof PARTNER_STATUSES[number])
+        : "contacting";
       store.savePartner(campaignId, {
         kind,
         name: String(p.name || "合作夥伴").trim(),
         organization: String(p.organization ?? ""),
         roleOrTopic: String(p.roleOrTopic ?? ""),
+        contact: String(p.contact ?? ""),
         shiftOrFee: String(p.shiftOrFee ?? ""),
-        teamId: snap.teams[0]?.id ?? null,
-        status: "contacting",
+        notes: String(p.notes ?? ""),
+        teamId: targetTeam?.id ?? null,
+        status,
       });
+    } else if (proposal.kind === "update_partner") {
+      const idStr = typeof p.partnerId === "string" ? p.partnerId.trim() : "";
+      const nameStr = typeof p.matchName === "string" ? p.matchName.trim() : typeof p.name === "string" ? p.name.trim() : "";
+      const target =
+        snap.partners.find((pt) => pt.id === idStr) ??
+        (nameStr ? snap.partners.find((pt) => pt.name.includes(nameStr) || nameStr.includes(pt.name)) : undefined);
+      if (target) {
+        const status = (PARTNER_STATUSES as readonly string[]).includes(String(p.status))
+          ? (String(p.status) as typeof PARTNER_STATUSES[number])
+          : target.status;
+        const targetTeam = resolveBotTeam(snap, p.teamId, p.teamName);
+        store.savePartner(campaignId, {
+          id: target.id,
+          kind: target.kind,
+          name: typeof p.name === "string" && p.name.trim() ? p.name.trim() : target.name,
+          organization: typeof p.organization === "string" ? p.organization : target.organization,
+          roleOrTopic: typeof p.roleOrTopic === "string" ? p.roleOrTopic : target.roleOrTopic,
+          contact: typeof p.contact === "string" ? p.contact : target.contact,
+          teamId: targetTeam ? targetTeam.id : target.teamId,
+          status,
+          shiftOrFee: typeof p.shiftOrFee === "string" ? p.shiftOrFee : target.shiftOrFee,
+          notes: typeof p.notes === "string" ? p.notes : target.notes,
+          tasks: target.tasks,
+        });
+      }
     } else if (proposal.kind === "adjust_pacing" || proposal.kind === "auto_schedule") {
       const pacing = (PACING_LEVELS as readonly string[]).includes(String(p.pacing))
         ? (String(p.pacing) as typeof PACING_LEVELS[number])
@@ -1130,22 +1343,78 @@ export function createApp(options: CreateAppOptions) {
       });
       store.applyAutoSchedule(campaignId, { pacing, preview });
     } else if (proposal.kind === "add_todo") {
-      const teamId = snap.teams.some((t) => t.id === String(p.teamId)) ? String(p.teamId) : snap.teams[0]?.id;
-      const weekId = snap.weeks.some((w) => w.id === String(p.weekId)) ? String(p.weekId) : null;
-      if (teamId && String(p.title ?? "").trim()) {
+      const team = resolveBotTeam(snap, p.teamId, p.teamName) ?? snap.teams[0];
+      const week = resolveBotWeek(snap, p.weekId, p.countdownLabel);
+      if (team && String(p.title ?? "").trim()) {
         store.addTodo(campaignId, {
-          teamId,
-          weekId,
+          teamId: team.id,
+          weekId: week?.id ?? null,
           title: String(p.title).trim(),
+          assignee: typeof p.assignee === "string" ? p.assignee : "",
           priority: p.priority === "high" ? "high" : "normal",
+          dueDate: typeof p.dueDate === "string" ? p.dueDate : "",
+        });
+      }
+    } else if (proposal.kind === "update_todo") {
+      const idStr = typeof p.todoId === "string" ? p.todoId.trim() : "";
+      const matchStr = typeof p.matchTitle === "string" ? p.matchTitle.trim() : "";
+      const targetTodo =
+        snap.todos.find((t) => t.id === idStr) ??
+        (matchStr ? snap.todos.find((t) => t.title.includes(matchStr)) : undefined);
+      if (targetTodo) {
+        const nextTeam = resolveBotTeam(snap, p.teamId, p.teamName);
+        const nextWeek = resolveBotWeek(snap, p.weekId, p.countdownLabel);
+        store.updateTodo(targetTodo.id, {
+          ...(typeof p.title === "string" && p.title.trim() ? { title: p.title.trim() } : {}),
+          ...(typeof p.done === "boolean" ? { done: p.done } : {}),
+          ...(nextTeam ? { teamId: nextTeam.id } : {}),
+          ...(nextWeek ? { weekId: nextWeek.id } : {}),
+          ...(typeof p.assignee === "string" ? { assignee: p.assignee } : {}),
+          ...(p.priority === "high" || p.priority === "normal" ? { priority: p.priority } : {}),
+          ...(typeof p.dueDate === "string" ? { dueDate: p.dueDate } : {}),
         });
       }
     } else if (proposal.kind === "toggle_todo") {
-      if (typeof p.todoId === "string") {
+      if (typeof p.todoId === "string" && snap.todos.some((t) => t.id === p.todoId)) {
         store.updateTodo(p.todoId, { done: p.done !== false });
       }
+    } else if (proposal.kind === "delete_todo") {
+      if (typeof p.todoId === "string") {
+        store.deleteTodo(p.todoId);
+      }
+    } else if (proposal.kind === "upsert_cell") {
+      const team = resolveBotTeam(snap, p.teamId, p.teamName) ?? snap.teams[0];
+      const week = resolveBotWeek(snap, p.weekId, p.countdownLabel) ?? snap.weeks[0];
+      if (team && week) {
+        const existing = snap.cells.find((c) => c.weekId === week.id && c.teamId === team.id);
+        const stage = (CELL_STAGES as readonly string[]).includes(String(p.stage))
+          ? (String(p.stage) as CellStage)
+          : existing?.stage ?? week.stage;
+        store.upsertCell({
+          weekId: week.id,
+          teamId: team.id,
+          stage,
+          weeklyFocus: typeof p.weeklyFocus === "string" ? p.weeklyFocus : existing?.weeklyFocus ?? "",
+          crossTeam: typeof p.crossTeam === "string" ? p.crossTeam : existing?.crossTeam ?? "",
+        });
+      }
+    } else if (proposal.kind === "update_week") {
+      const targetWeek = resolveBotWeek(snap, p.weekId, p.countdownLabel);
+      if (targetWeek) {
+        const stage = (CELL_STAGES as readonly string[]).includes(String(p.stage))
+          ? (String(p.stage) as CellStage)
+          : undefined;
+        store.updateWeek(targetWeek.id, {
+          ...(stage ? { stage } : {}),
+          ...(typeof p.memo === "string" ? { memo: p.memo } : {}),
+          ...(typeof p.dateRange === "string" && p.dateRange.trim() ? { dateRange: p.dateRange.trim() } : {}),
+          ...(typeof p.progressOverride === "number" || p.progressOverride === null
+            ? { progressOverride: p.progressOverride }
+            : {}),
+        });
+      }
     } else if (proposal.kind === "add_week_event") {
-      const targetWeek = snap.weeks.find((w) => w.id === String(p.weekId)) ?? snap.weeks[0];
+      const targetWeek = resolveBotWeek(snap, p.weekId, p.countdownLabel) ?? snap.weeks[0];
       if (targetWeek && String(p.title ?? "").trim()) {
         store.updateWeek(targetWeek.id, {
           majorEvents: [
@@ -1158,15 +1427,18 @@ export function createApp(options: CreateAppOptions) {
           ],
         });
       }
-    } else if (proposal.kind === "create_meeting") {
+    } else if (proposal.kind === "create_meeting" || proposal.kind === "update_meeting") {
+      const existingId = typeof p.meetingId === "string" ? p.meetingId.trim() : "";
+      const existingMtg = existingId ? snap.meetings.find((m) => m.id === existingId) : undefined;
       store.saveMeeting(campaignId, {
-        title: String(p.title || "籌備對齊會議"),
-        meetingDate: String(p.meetingDate || new Date().toISOString().slice(0, 10)),
-        attendees: String(p.attendees || "全體組長"),
-        agenda: String(p.agenda || ""),
-        arrangements: String(p.arrangements || ""),
-        precautions: String(p.precautions || ""),
-        decisions: "",
+        ...(existingMtg ? { id: existingMtg.id } : {}),
+        title: String(p.title || existingMtg?.title || "籌備對齊會議"),
+        meetingDate: String(p.meetingDate || existingMtg?.meetingDate || new Date().toISOString().slice(0, 10)),
+        attendees: String(p.attendees ?? existingMtg?.attendees ?? "全體組長"),
+        agenda: String(p.agenda ?? existingMtg?.agenda ?? ""),
+        arrangements: String(p.arrangements ?? existingMtg?.arrangements ?? ""),
+        precautions: String(p.precautions ?? existingMtg?.precautions ?? ""),
+        decisions: String(p.decisions ?? existingMtg?.decisions ?? ""),
       });
     } else if (proposal.kind === "create_note") {
       store.saveNote(campaignId, {
@@ -1181,6 +1453,8 @@ export function createApp(options: CreateAppOptions) {
       const doc = buildBuiltinHandbook(snap, {
         template: tpl,
         recipientName: typeof p.recipientName === "string" ? p.recipientName : undefined,
+        venue: typeof p.venue === "string" ? p.venue : undefined,
+        extraNotes: typeof p.extraNotes === "string" ? p.extraNotes : undefined,
       });
       store.saveGeneratedDoc(campaignId, {
         title: doc.title,
@@ -1189,17 +1463,67 @@ export function createApp(options: CreateAppOptions) {
         templateKind: tpl,
       });
     } else if (proposal.kind === "update_applicant") {
-      if (typeof p.responseId === "string") {
+      const respId =
+        typeof p.responseId === "string" && snap.formResponses.some((r) => r.id === p.responseId)
+          ? p.responseId
+          : typeof p.applicantName === "string"
+            ? snap.formResponses.find((r) => r.applicantName.includes(String(p.applicantName)))?.id
+            : undefined;
+      if (respId) {
         const status = (APPLICANT_STATUSES as readonly string[]).includes(String(p.status))
           ? (String(p.status) as typeof APPLICANT_STATUSES[number])
           : "accepted";
-        store.updateFormResponse(p.responseId, {
+        const targetTeam = resolveBotTeam(snap, p.preferredTeamId, p.teamName);
+        store.updateFormResponse(respId, {
           status,
+          ...(targetTeam ? { preferredTeamId: targetTeam.id } : {}),
           ...(typeof p.reviewerNote === "string" ? { reviewerNote: p.reviewerNote } : {}),
         });
       }
     }
+  }
 
+  app.post("/api/campaigns/:id/bot/chat", async (req, res) => {
+    const parsed = botChatSchema.safeParse(req.body);
+    if (!parsed.success) throw new AppError(400, "請輸入想請 Campaign Bot 協助的內容。");
+    const campaignId = req.params.id;
+    const snap = store.getSnapshot(campaignId);
+    store.appendBotMessage(campaignId, "user", parsed.data.message);
+
+    const controller = new AbortController();
+    const onClose = () => {
+      if (!res.writableEnded) controller.abort();
+    };
+    res.on("close", onClose);
+    try {
+      const reply = await replyCampaignBot(snap, parsed.data.message, snap.settings, controller.signal, aiRunner);
+      const autoExecute = snap.settings.botAutoApply !== false;
+      const executedProposals = reply.proposals.map((prop) => {
+        if (autoExecute && !DESTRUCTIVE_BOT_KINDS.has(prop.kind)) {
+          try {
+            executeBotProposal(campaignId, prop);
+            return { ...prop, applied: true };
+          } catch {
+            return prop;
+          }
+        }
+        return prop;
+      });
+      store.appendBotMessage(campaignId, "assistant", reply.content, executedProposals);
+      res.json(store.getSnapshot(campaignId));
+    } finally {
+      res.off("close", onClose);
+    }
+  });
+
+  app.post("/api/campaigns/:id/bot/apply", (req, res) => {
+    const parsed = botApplySchema.safeParse(req.body);
+    if (!parsed.success) throw new AppError(400, "操作建議識別碼格式不正確。");
+    const campaignId = req.params.id;
+    const { proposal, alreadyApplied } = store.markProposalApplied(parsed.data.messageId, parsed.data.proposalId);
+    if (!alreadyApplied) {
+      executeBotProposal(campaignId, proposal);
+    }
     res.json(store.getSnapshot(campaignId));
   });
 
@@ -1210,7 +1534,7 @@ export function createApp(options: CreateAppOptions) {
   if (existsSync(distDir)) {
     app.use(express.static(distDir));
     app.get("/{*path}", (_req, res) => {
-      res.sendFile(resolve(distDir, "index.html"));
+      res.sendFile(resolve(distDir, "index.html"), { dotfiles: "allow" });
     });
   }
 

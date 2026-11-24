@@ -1,6 +1,14 @@
 export const AI_PROVIDERS = ["builtin", "codex", "claude", "antigravity", "api"] as const;
 export type AiProvider = (typeof AI_PROVIDERS)[number];
 
+export const PONYTAIL_MODES = ["off", "lite", "full", "ultra"] as const;
+export type PonytailMode = (typeof PONYTAIL_MODES)[number];
+export const DEFAULT_PONYTAIL_MODE: PonytailMode = "ultra";
+
+export const THINKING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type ThinkingEffort = (typeof THINKING_EFFORTS)[number];
+export const DEFAULT_THINKING_EFFORT: ThinkingEffort = "medium";
+
 export const PACING_LEVELS = ["relaxed", "steady", "balanced", "compact", "intense"] as const;
 export type PacingLevel = (typeof PACING_LEVELS)[number];
 
@@ -110,6 +118,9 @@ export const PACING_META: readonly PacingMeta[] = [
 export interface ProviderSettings {
   provider: AiProvider;
   model: string;
+  ponytailMode: PonytailMode;
+  thinkingEffort: ThinkingEffort;
+  botAutoApply: boolean;
 }
 
 export interface MonthlyGoal {
@@ -303,19 +314,32 @@ export interface FormResponseItem {
   submittedAt: string;
 }
 
-export type BotActionKind =
-  | "setup_project_brief"
-  | "reschedule_timeline"
-  | "adjust_pacing"
-  | "auto_schedule"
-  | "add_todo"
-  | "toggle_todo"
-  | "add_week_event"
-  | "create_meeting"
-  | "create_note"
-  | "generate_handbook"
-  | "update_applicant"
-  | "add_partner";
+export const BOT_ACTION_KINDS = [
+  "setup_project_brief",
+  "update_campaign",
+  "reschedule_timeline",
+  "adjust_pacing",
+  "auto_schedule",
+  "create_team",
+  "update_team",
+  "split_team",
+  "delete_team",
+  "add_todo",
+  "update_todo",
+  "toggle_todo",
+  "delete_todo",
+  "upsert_cell",
+  "update_week",
+  "add_week_event",
+  "create_meeting",
+  "update_meeting",
+  "create_note",
+  "generate_handbook",
+  "update_applicant",
+  "add_partner",
+  "update_partner",
+] as const;
+export type BotActionKind = (typeof BOT_ACTION_KINDS)[number];
 
 export interface BotActionProposal {
   id: string;
