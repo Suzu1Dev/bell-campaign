@@ -439,33 +439,107 @@ select:focus-visible {
   border-color: var(--danger-line);
 }
 
-/* Suite sibling chips */
-.suite-chip {
+/* Suite outgoing handoff menu */
+.suite-handoff-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.suite-handoff-trigger.is-compact {
+  height: 26px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.suite-handoff-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 40;
+  min-width: 216px;
+  padding: 4px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-md);
+  background: var(--overlay);
+  box-shadow: var(--shadow-pop);
+  display: grid;
+  gap: 2px;
+}
+
+.suite-handoff-popover.is-up {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+
+.suite-handoff-popover.is-left {
+  right: auto;
+  left: 0;
+}
+
+.suite-handoff-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.suite-handoff-item:hover,
+.suite-handoff-item:focus-visible {
+  background: var(--fill-hover);
+  outline: none;
+}
+
+.suite-handoff-item:focus-visible {
+  box-shadow: var(--focus);
+}
+
+.suite-handoff-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-xs);
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  height: 24px;
-  padding: 0 8px;
-  border-radius: var(--radius-xs);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  border: 1px solid var(--line);
+  justify-content: center;
+  flex-shrink: 0;
 }
 
-.suite-chip-personal {
-  background: var(--personal-tint);
-  color: var(--personal-text);
+.suite-handoff-dot.is-explain { background: var(--explain-tint); color: var(--explain-text); }
+.suite-handoff-dot.is-reader { background: var(--reader-tint); color: var(--reader-text); }
+.suite-handoff-dot.is-personal { background: var(--personal-tint); color: var(--personal-text); }
+.suite-handoff-dot.is-pr { background: var(--pr-tint); color: var(--pr-text); }
+
+/* Tasks view responsive row */
+.task-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 8px;
+  border-top: 1px solid var(--line);
 }
 
-.suite-chip-explain {
-  background: var(--explain-tint);
-  color: var(--explain-text);
+.task-row-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
 }
 
-.suite-chip-pr {
-  background: var(--pr-tint);
-  color: var(--pr-text);
+.task-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
 }
 
 /* Team semantic dots */
@@ -476,12 +550,12 @@ select:focus-visible {
   display: inline-block;
   flex-shrink: 0;
 }
-.team-dot-rose { background: #D9487D; }
-.team-dot-violet { background: #6A56EB; }
-.team-dot-mint { background: #26A269; }
-.team-dot-amber { background: #D9820B; }
-.team-dot-sky { background: #0B6BCB; }
-.team-dot-terracotta { background: #C25E31; }
+.team-dot-rose { background: var(--team-rose); }
+.team-dot-violet { background: var(--team-violet); }
+.team-dot-mint { background: var(--team-mint); }
+.team-dot-amber { background: var(--team-amber); }
+.team-dot-sky { background: var(--team-sky); }
+.team-dot-terracotta { background: var(--team-terracotta); }
 
 /* ── KPI Strip ──────────────────────────────────────────────────────────── */
 .kpi-grid {
@@ -1187,7 +1261,7 @@ select:focus-visible {
 .sheet-preview-scroll {
   max-height: 410px;
   overflow: auto;
-  background: #FFFFFF;
+  background: var(--sheet-paper);
 }
 .sheet-preview-table {
   border-collapse: collapse;
@@ -1223,39 +1297,9 @@ select:focus-visible {
 }
 
 .dk-root {
-  --dk-paper: #FAF9F6;
-  --dk-card: #FFFFFF;
-  --dk-well: #F2F0EA;
-  --dk-line: #E4E1D9;
-  --dk-text-1: #14161B;
-  --dk-text-2: #494E59;
-  --dk-text-3: #767C89;
-  --dk-brand: #9E2B5C;
-  --dk-brand-soft: #F9ECF1;
-  --dk-brand-line: #E6BDCE;
-  --dk-warn: #C27018;
-  --dk-warn-soft: #FDF3E4;
-  --dk-ok: #26785A;
-  --dk-bar: #9E2B5C;
   color: var(--dk-text-1);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
-}
-.dk-root[data-deck-theme="dark"] {
-  --dk-paper: #12141C;
-  --dk-card: #191C27;
-  --dk-well: #151822;
-  --dk-line: #282D3E;
-  --dk-text-1: #F3F4F8;
-  --dk-text-2: #B8BECC;
-  --dk-text-3: #7E8596;
-  --dk-brand: #E86B9E;
-  --dk-brand-soft: #2B1824;
-  --dk-brand-line: #5C2B45;
-  --dk-warn: #F0A44B;
-  --dk-warn-soft: #2B2115;
-  --dk-ok: #4CC39A;
-  --dk-bar: #E86B9E;
 }
 .dk-slide {
   background: var(--dk-paper);
@@ -1459,12 +1503,12 @@ select:focus-visible {
   position: fixed;
   inset: 0;
   z-index: 220;
-  background: #E7E4DC;
+  background: var(--deck-stage-light);
   display: flex;
   flex-direction: column;
 }
 .deck-fullscreen-overlay[data-bg="dark"] {
-  background: #090B10;
+  background: var(--deck-stage-dark);
 }
 .deck-fullscreen-bar {
   padding: 10px 20px;
@@ -2050,7 +2094,7 @@ select:focus-visible {
   width: 13px;
   height: 13px;
   border-radius: 999px;
-  background: #FFFFFF;
+  background: var(--switch-thumb);
   box-shadow: 0 1px 2px rgba(15, 17, 21, 0.28);
   transform: translateX(0);
   transition: transform var(--dur-1) var(--ease-out);
@@ -2341,8 +2385,12 @@ select:focus-visible {
   background: var(--fill-hover);
 }
 
-.p-command-item.is-unlinked {
+.p-command-item.is-unlinked .p-app-icon {
   opacity: 0.6;
+}
+
+.p-command-item.is-unlinked .p-command-app-name {
+  color: var(--text-3);
 }
 
 .p-app-icon {
@@ -2368,7 +2416,15 @@ select:focus-visible {
 }
 .p-command-app-name { font-size: 13.5px; font-weight: 600; }
 .p-command-app-summary { font-size: 12.5px; color: var(--text-3); }
-.p-command-app-state { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-3); }
+.p-command-app-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-3);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
 
 .p-kbd {
   font-family: var(--font-mono);
@@ -2377,7 +2433,7 @@ select:focus-visible {
   border-radius: 4px;
   background: var(--raised-2);
   border: 1px solid var(--line);
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 .p-command-footer {
@@ -2385,7 +2441,8 @@ select:focus-visible {
   border-top: 1px solid var(--line);
   background: var(--chrome);
   display: flex;
-  gap: 14px;
+  flex-wrap: wrap;
+  gap: 8px 14px;
   font-size: 12px;
   color: var(--text-3);
 }
@@ -2463,6 +2520,22 @@ select:focus-visible {
   .sheet-import-grid,
   .md-split-pane {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .task-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 11px 4px;
+  }
+  .task-row-actions {
+    padding-left: 27px;
+    justify-content: flex-end;
+  }
+  .suite-handoff-item {
+    min-height: 42px;
   }
 }
 

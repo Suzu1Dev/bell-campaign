@@ -27,6 +27,8 @@ import {
   parseCampaignHandoff,
   personalTaskHref,
   prDraftHref,
+  safePublicHttpUrl,
+  suiteHandoffUrl,
 } from "./suite.js";
 import { buildSlidesDeckModel, buildStyledSheetModel, renderSingleSlideHtml } from "./exporters.js";
 import { isSafeMarkdownUrl, parseMarkdownBlocks } from "./markdown.js";
@@ -201,6 +203,101 @@ test("Suite handoff parser enforces allowlisted origins, single params, and clea
   const prParams = new URLSearchParams(prHref!.split("?")[1]);
   assert.equal(prParams.get("from"), "campaign");
   assert.equal(prParams.get("back"), "#/tasks");
+
+  // Unified suiteHandoffUrl across all 4 siblings
+  assert.equal(safePublicHttpUrl("https://hackmd.io/@bell/sync"), "https://hackmd.io/@bell/sync");
+  assert.equal(safePublicHttpUrl("javascript:alert(1)"), undefined);
+  assert.equal(safePublicHttpUrl("data:text/html,hi"), undefined);
+
+  const uExplain = suiteHandoffUrl(
+    "explain",
+    {
+      origin: "http://127.0.0.1:20001",
+      text: "會議決議細節",
+      title: "週會\n紀錄",
+      back: "#/meetings",
+    },
+    "127.0.0.1",
+  );
+  assert.ok(uExplain?.startsWith("http://127.0.0.1:20001/#/explain?"));
+  const expParams = new URLSearchParams(uExplain!.split("?")[1]);
+  assert.equal(expParams.get("text"), "會議決議細節");
+  assert.equal(expParams.get("title"), "週會 紀錄");
+  assert.equal(expParams.get("from"), "campaign");
+  assert.equal(expParams.get("back"), "#/meetings");
+
+  const uReaderSafe = suiteHandoffUrl(
+    "reader",
+    {
+      origin: "http://127.0.0.1:21104",
+      text: "議程大綱",
+      title: "對齊會議",
+      url: "https://hackmd.io/@bell/sync",
+      back: "#/files",
+    },
+    "127.0.0.1",
+  );
+  assert.ok(uReaderSafe?.startsWith("http://127.0.0.1:21104/#/read?"));
+  const readerParams = new URLSearchParams(uReaderSafe!.split("?")[1]);
+  assert.equal(readerParams.get("url"), "https://hackmd.io/@bell/sync");
+  assert.equal(readerParams.get("back"), "#/files");
+
+  const uReaderUnsafeUrl = suiteHandoffUrl(
+    "reader",
+    {
+      origin: "http://127.0.0.1:21104",
+      text: "議程大綱",
+      url: "javascript:alert(1)",
+      back: "#/files",
+    },
+    "127.0.0.1",
+  );
+  assert.equal(new URLSearchParams(uReaderUnsafeUrl!.split("?")[1]).has("url"), false);
+
+  const uPersonal = suiteHandoffUrl(
+    "personal",
+    {
+      origin: "http://127.0.0.1:20003",
+      title: "志工審核",
+      text: "寄發錄取通知",
+      back: "#/forms",
+    },
+    "127.0.0.1",
+  );
+  assert.ok(uPersonal?.startsWith("http://127.0.0.1:20003/#/tasks?"));
+  const persParams = new URLSearchParams(uPersonal!.split("?")[1]);
+  assert.equal(persParams.get("draft"), "志工審核 — 寄發錄取通知");
+  assert.equal(persParams.has("title"), false);
+  assert.equal(persParams.get("from"), "campaign");
+  assert.equal(persParams.get("back"), "#/forms");
+
+  // Already-prefixed personal draft should not double-prepend
+  const uPersonalPrefixed = suiteHandoffUrl(
+    "personal",
+    {
+      origin: "http://127.0.0.1:20003",
+      title: "志工審核",
+      text: "志工審核 — 寄發錄取通知",
+      back: "#/forms",
+    },
+    "127.0.0.1",
+  );
+  assert.equal(
+    new URLSearchParams(uPersonalPrefixed!.split("?")[1]).get("draft"),
+    "志工審核 — 寄發錄取通知",
+  );
+
+  // Unsafe origin & disallowed back routes
+  assert.equal(
+    suiteHandoffUrl("explain", { origin: "https://evil.example.com", text: "hi" }, "127.0.0.1"),
+    undefined,
+  );
+  const badBack = suiteHandoffUrl(
+    "pr",
+    { origin: "http://127.0.0.1:20002", text: "PR draft", back: "#/not-allowed" },
+    "127.0.0.1",
+  );
+  assert.equal(new URLSearchParams(badBack!.split("?")[1]).has("back"), false);
 });
 
 test("Bidirectional Google Docs & HackMD meeting parser round-trips cleanly and curates benchmarks", () => {

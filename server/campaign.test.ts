@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -1029,4 +1029,60 @@ test("Blank and seeded campaign Bot commands do not hijack operational intents o
     );
     assert.equal(rSeededHandbook.snap.campaign.brief, seededBrief);
   });
+});
+
+test("Dot-directory dataDir/uploads and distDir serve GET /api/files/:id/raw and SPA fallback without exposing hidden dotfiles", async () => {
+  const root = mkdtempSync(join(tmpdir(), "bell-campaign-dotdir-"));
+  const dotDataDir = join(root, ".e2e-dotdir", "data");
+  const dotDistDir = join(root, ".e2e-dotdir", "dist");
+  mkdirSync(dotDataDir, { recursive: true });
+  mkdirSync(dotDistDir, { recursive: true });
+  writeFileSync(join(dotDistDir, "index.html"), "<!doctype html><html><body>SPA-OK</body></html>", "utf8");
+  writeFileSync(join(dotDistDir, ".env"), "SECRET=do-not-serve", "utf8");
+
+  const store = new CampaignStore(join(dotDataDir, "campaign.db"), join(dotDataDir, "uploads"));
+  const app = createApp({ store, distDir: dotDistDir });
+  const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+    const s = app.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  const { port } = server.address() as AddressInfo;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  try {
+    const snap = store.getSnapshot();
+    const pdfBytes = Buffer.from("%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n", "utf8");
+    const upRes = await fetch(`${baseUrl}/api/campaigns/${snap.campaign.id}/files/upload`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "Dotdir PDF",
+        category: "handbook",
+        fileName: "guide.pdf",
+        mimeType: "application/pdf",
+        dataBase64: pdfBytes.toString("base64"),
+      }),
+    });
+    assert.equal(upRes.status, 201);
+    const updatedSnap = (await upRes.json()) as CampaignSnapshot;
+    const uploaded = updatedSnap.files.find((f) => f.title === "Dotdir PDF");
+    assert.ok(uploaded);
+
+    const rawRes = await fetch(`${baseUrl}/api/files/${uploaded.id}/raw?inline=1`);
+    assert.equal(rawRes.status, 200);
+    assert.equal(rawRes.headers.get("content-type"), "application/pdf");
+    assert.deepEqual(Buffer.from(await rawRes.arrayBuffer()), pdfBytes);
+
+    const spaRes = await fetch(`${baseUrl}/`);
+    assert.equal(spaRes.status, 200);
+    assert.match(await spaRes.text(), /SPA-OK/);
+
+    const hiddenRes = await fetch(`${baseUrl}/.env`);
+    assert.equal(hiddenRes.status, 200);
+    const hiddenBody = await hiddenRes.text();
+    assert.ok(!hiddenBody.includes("SECRET=do-not-serve"));
+    assert.match(hiddenBody, /SPA-OK/);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

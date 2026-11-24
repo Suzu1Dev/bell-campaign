@@ -1420,11 +1420,11 @@ export const DECK_SHARED_CSS = `
   --dk-line: #E4E1D9;
   --dk-text-1: #14161B;
   --dk-text-2: #494E59;
-  --dk-text-3: #767C89;
+  --dk-text-3: #5F6572;
   --dk-brand: #9E2B5C;
   --dk-brand-soft: #F9ECF1;
   --dk-brand-line: #E6BDCE;
-  --dk-warn: #C27018;
+  --dk-warn: #8A5200;
   --dk-warn-soft: #FDF3E4;
   --dk-ok: #26785A;
   --dk-bar: #9E2B5C;
@@ -1433,20 +1433,20 @@ export const DECK_SHARED_CSS = `
   -webkit-font-smoothing: antialiased;
 }
 .dk-root[data-deck-theme="dark"] {
-  --dk-paper: #12141C;
-  --dk-card: #191C27;
-  --dk-well: #151822;
-  --dk-line: #282D3E;
+  --dk-paper: #111318;
+  --dk-card: #17191E;
+  --dk-well: #14161B;
+  --dk-line: #272B34;
   --dk-text-1: #F3F4F8;
   --dk-text-2: #B8BECC;
-  --dk-text-3: #7E8596;
-  --dk-brand: #E86B9E;
-  --dk-brand-soft: #2B1824;
-  --dk-brand-line: #5C2B45;
-  --dk-warn: #F0A44B;
-  --dk-warn-soft: #2B2115;
-  --dk-ok: #4CC39A;
-  --dk-bar: #E86B9E;
+  --dk-text-3: #8A8F9A;
+  --dk-brand: #E25B91;
+  --dk-brand-soft: #2C1923;
+  --dk-brand-line: rgba(242, 139, 180, .30);
+  --dk-warn: #F5B851;
+  --dk-warn-soft: #2D2314;
+  --dk-ok: #46D992;
+  --dk-bar: #E25B91;
 }
 .dk-slide {
   background: var(--dk-paper);

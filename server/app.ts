@@ -1534,7 +1534,7 @@ export function createApp(options: CreateAppOptions) {
   if (existsSync(distDir)) {
     app.use(express.static(distDir));
     app.get("/{*path}", (_req, res) => {
-      res.sendFile(resolve(distDir, "index.html"));
+      res.sendFile(resolve(distDir, "index.html"), { dotfiles: "allow" });
     });
   }
 

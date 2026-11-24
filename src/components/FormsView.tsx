@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
-  ArrowUpRight,
   Check,
   ClipboardList,
   ExternalLink,
@@ -10,7 +9,6 @@ import {
   RefreshCw,
   Search,
   Settings2,
-  Sparkles,
   UserCheck,
   Users,
   X,
@@ -23,8 +21,9 @@ import {
   type CampaignSnapshot,
   type FormResponseItem,
 } from "../../shared/types";
-import { personalTaskHref, type SuiteLinks } from "../../shared/suite";
+import type { SuiteLinks } from "../../shared/suite";
 import { apiWrite } from "../lib/api";
+import SuiteHandoffMenu from "./SuiteHandoffMenu";
 
 const STATUS_META: Record<ApplicantStatus, { label: string; pillClass: string }> = {
   pending: { label: "待審核", pillClass: "pill pill-warn" },
@@ -909,21 +908,20 @@ export default function FormsView({
                   }}
                 >
                   <div>
-                    {(() => {
-                      const href = personalTaskHref(
-                        suiteLinks.personal,
-                        `寄發志工錄取／面談通知給 ${reviewing.applicantName}（${reviewing.email || reviewing.handle}）`,
-                        "#/forms",
-                        window.location.hostname,
-                      );
-                      return href ? (
-                        <a href={href} className="suite-chip suite-chip-personal">
-                          <Sparkles size={12} />
-                          <span>送到 Personal 排程通知</span>
-                          <ArrowUpRight size={12} />
-                        </a>
-                      ) : null;
-                    })()}
+                    <SuiteHandoffMenu
+                      links={suiteLinks}
+                      title={`志工審核：${reviewing.applicantName}`}
+                      text={[
+                        `寄發志工${STATUS_META[revStatus].label}通知給 ${reviewing.applicantName}（${reviewing.email || reviewing.handle || "無聯絡方式"}）`,
+                        `分發組別：${teamMap.get(revTeamId)?.name ?? "待分發"} · 職務：${ROLE_LABELS[reviewing.roleType]}`,
+                        reviewing.skills.length > 0 ? `專長：${reviewing.skills.join("、")}` : "",
+                        reviewing.availability.length > 0 ? `時段：${reviewing.availability.join(" · ")}` : "",
+                        revNote.trim() ? `審核備註：${revNote.trim()}` : "",
+                      ]
+                        .filter(Boolean)
+                        .join("\n")}
+                      back="#/forms"
+                    />
                   </div>
 
                   <div style={{ display: "flex", gap: 8 }}>

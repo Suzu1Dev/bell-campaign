@@ -31,7 +31,7 @@
     "prepare": "node -e \"import('node:fs').then(fs=>{if(fs.existsSync('node_modules/vite')&&!fs.existsSync('dist/index.html'))import('node:child_process').then(cp=>cp.execSync('npm run build',{stdio:'inherit'}))})\"",
     "prepack": "npm run build",
     "start": "tsx --env-file-if-exists=.env server/index.ts",
-    "test": "BELL_LOG=off tsx --test --test-timeout=60000 server/*.test.ts shared/*.test.ts",
+    "test": "BELL_LOG=off tsx --test --test-timeout=60000 server/*.test.ts shared/*.test.ts src/components/*.test.ts src/lib/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

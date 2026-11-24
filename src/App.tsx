@@ -35,6 +35,7 @@ import {
   formatCampaignDateLabel,
 } from "../shared/sheets";
 import { apiGet, apiWrite } from "./lib/api";
+import { formatShortcut, resolveInitialTheme } from "./lib/uiPrefs";
 import SuiteSwitcher from "./components/SuiteSwitcher";
 import ScheduleView from "./components/ScheduleView";
 import { MeetingsView, NotesView, TasksView } from "./components/TasksNotesMeetingsView";
@@ -73,13 +74,7 @@ function resolveRouteFromHash(hash: string): RouteKey {
 }
 
 function getInitialTheme(): "light" | "dark" {
-  try {
-    const saved = localStorage.getItem("bell.theme");
-    if (saved === "light" || saved === "dark") return saved;
-  } catch {
-    // ignore storage errors
-  }
-  return "light";
+  return resolveInitialTheme();
 }
 
 const ROUTE_TITLES: Record<RouteKey, { title: string; subtitle: string }> = {
@@ -172,12 +167,19 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    try {
-      localStorage.setItem("bell.theme", theme);
-    } catch {
-      // ignore
-    }
   }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => {
+      const next = prev === "dark" ? "light" : "dark";
+      try {
+        localStorage.setItem("bell.theme", next);
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  }, []);
 
   const loadManifest = useCallback(async () => {
     try {
@@ -425,6 +427,7 @@ export default function App() {
   ];
 
   const headerMeta = ROUTE_TITLES[route];
+  const switcherShortcut = useMemo(() => formatShortcut("K"), []);
 
   return (
     <div
@@ -445,7 +448,7 @@ export default function App() {
             type="button"
             className="suite-brand-btn"
             onClick={() => setSwitcherOpen(true)}
-            title="切換 BELL Suite 產品（⌘K）"
+            title={`切換 BELL Suite 產品（${switcherShortcut}）`}
           >
             <span className="brand-tile" aria-hidden="true">
               <CalendarRange size={14} />
@@ -538,7 +541,7 @@ export default function App() {
             style={{ padding: "0 8px" }}
           >
             <span>切換工具</span>
-            <kbd className="p-kbd">⌘K</kbd>
+            <kbd className="p-kbd">{switcherShortcut}</kbd>
           </button>
 
           <button
@@ -546,7 +549,7 @@ export default function App() {
             className="icon-btn"
             aria-label={theme === "dark" ? "切換為淺色模式" : "切換為深色模式"}
             title={theme === "dark" ? "切換為淺色模式" : "切換為深色模式"}
-            onClick={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
+            onClick={toggleTheme}
           >
             {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
           </button>
@@ -626,7 +629,7 @@ export default function App() {
               type="button"
               className="icon-btn"
               aria-label={theme === "dark" ? "切換為淺色模式" : "切換為深色模式"}
-              onClick={() => setTheme((prev) => (prev === "dark" ? "light" : "dark"))}
+              onClick={toggleTheme}
             >
               {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
             </button>
@@ -757,12 +760,14 @@ export default function App() {
           ) : route === "files" ? (
             <FilesHandbookView
               snapshot={snapshot}
+              suiteLinks={suiteLinks}
               onSnapshot={setSnapshot}
               notify={notify}
             />
           ) : route === "meetings" ? (
             <MeetingsView
               snapshot={snapshot}
+              suiteLinks={suiteLinks}
               onSnapshot={setSnapshot}
               notify={notify}
             />

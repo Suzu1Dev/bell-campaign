@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ArrowUpRight, AudioLines, CalendarRange, Check, GitPullRequest, Highlighter, Search, Sun } from "lucide-react";
 import { Command } from "cmdk";
 import type { SuiteAppId, SuiteLinks } from "../../shared/suite";
+import { formatShortcut } from "../lib/uiPrefs";
 
 const APPS: Array<{
   id: SuiteAppId;
@@ -31,6 +32,7 @@ export default function SuiteSwitcher({
   onRetry?: () => void;
 }) {
   const [search, setSearch] = useState("");
+  const quickSwitchHint = formatShortcut("1–5");
   useEffect(() => {
     if (!open) setSearch("");
   }, [open]);
@@ -127,7 +129,7 @@ export default function SuiteSwitcher({
                     ) : (
                       <span>尚未連結</span>
                     )}
-                    <kbd className="p-kbd">⌃{app.shortcut}</kbd>
+                    <kbd className="p-kbd">{formatShortcut(String(app.shortcut))}</kbd>
                   </div>
                 </Command.Item>
               );
@@ -138,7 +140,7 @@ export default function SuiteSwitcher({
       <div className="p-command-footer" aria-hidden="true">
         <span>↑↓ 選擇</span>
         <span>Enter 開啟</span>
-        <span>⌃1–5 快速切換</span>
+        <span>{quickSwitchHint} 快速切換</span>
       </div>
     </Command.Dialog>
   );

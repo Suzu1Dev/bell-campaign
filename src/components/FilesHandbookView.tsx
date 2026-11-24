@@ -23,8 +23,10 @@ import {
   type HandbookTemplate,
 } from "../../shared/types";
 import { inferUploadMimeType } from "../../shared/docs";
+import type { SuiteLinks } from "../../shared/suite";
 import { apiWrite } from "../lib/api";
 import MarkdownPreview from "./MarkdownPreview";
+import SuiteHandoffMenu from "./SuiteHandoffMenu";
 
 type FilePreviewKind = "image" | "pdf" | "markdown" | "text" | "binary";
 
@@ -74,10 +76,12 @@ const TEMPLATE_OPTIONS: Array<{ id: HandbookTemplate; label: string; hint: strin
 
 export default function FilesHandbookView({
   snapshot,
+  suiteLinks,
   onSnapshot,
   notify,
 }: {
   snapshot: CampaignSnapshot;
+  suiteLinks: SuiteLinks;
   onSnapshot: (next: CampaignSnapshot) => void;
   notify: (msg: string) => void;
 }) {
@@ -535,6 +539,21 @@ export default function FilesHandbookView({
                             <span>複製全文</span>
                           </button>
                         )}
+                        <SuiteHandoffMenu
+                          links={suiteLinks}
+                          title={viewingFile.title}
+                          text={
+                            previewKind === "markdown" || previewKind === "text"
+                              ? editDocText.trim() || viewingFile.contentMd.trim()
+                              : [
+                                  `專案文件：${viewingFile.title}`,
+                                  `檔名：${viewingFile.fileName}（${CATEGORY_LABELS[viewingFile.category]} · ${viewingFile.mimeType}${viewingFile.sizeBytes > 0 ? ` · ${formatFileSize(viewingFile.sizeBytes)}` : ""}）`,
+                                  `活動專案：${snapshot.campaign.name}`,
+                                  "請協助整理重點、確認注意事項或轉換為團隊待辦。",
+                                ].join("\n")
+                          }
+                          back="#/files"
+                        />
                         <button
                           type="button"
                           className="btn btn-sm"

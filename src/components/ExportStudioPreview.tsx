@@ -57,12 +57,12 @@ export function ScaledDeckStage({
 }
 
 const DECK_TEAM_ACCENT: Record<TeamColor, string> = {
-  rose: "#C93B6B",
-  violet: "#6D5BD0",
-  mint: "#2B8A66",
-  amber: "#C87A19",
-  sky: "#2E74B5",
-  terracotta: "#C85A3B",
+  rose: "var(--dk-team-rose)",
+  violet: "var(--dk-team-violet)",
+  mint: "var(--dk-team-mint)",
+  amber: "var(--dk-team-amber)",
+  sky: "var(--dk-team-sky)",
+  terracotta: "var(--dk-team-terracotta)",
 };
 
 export function DeckSlideView({
@@ -276,7 +276,7 @@ export function DeckSlideView({
         </header>
         <div className="dk-bento-teams" style={{ flex: 1 }}>
           {slide.teams.map((t) => {
-            const accent = DECK_TEAM_ACCENT[t.color] ?? "#9E2B5C";
+            const accent = DECK_TEAM_ACCENT[t.color] ?? "var(--dk-brand)";
             return (
               <div key={t.id} className="dk-card dk-team-card" style={{ borderTop: `3px solid ${accent}` }}>
                 <div className="dk-team-top">
@@ -396,7 +396,7 @@ export function DeckSlideView({
           </thead>
           <tbody>
             {slide.rows.map((r) => {
-              const accent = DECK_TEAM_ACCENT[r.color] ?? "#9E2B5C";
+              const accent = DECK_TEAM_ACCENT[r.color] ?? "var(--dk-brand)";
               return (
                 <tr key={r.teamName}>
                   <td>

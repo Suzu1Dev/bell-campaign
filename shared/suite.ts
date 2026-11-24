@@ -194,23 +194,76 @@ export function parseCampaignHandoff(
   };
 }
 
+export type SuiteHandoffTarget = Exclude<SuiteAppId, "campaign">;
+
+export function safePublicHttpUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const HANDOFF_TARGET_SPECS: Record<
+  SuiteHandoffTarget,
+  { route: string; textKey: "text" | "draft"; allowTitle: boolean }
+> = {
+  explain: { route: "/explain", textKey: "text", allowTitle: true },
+  reader: { route: "/read", textKey: "text", allowTitle: true },
+  pr: { route: "/discover", textKey: "draft", allowTitle: true },
+  personal: { route: "/tasks", textKey: "draft", allowTitle: false },
+};
+
+export function suiteHandoffUrl(
+  target: SuiteHandoffTarget,
+  input: {
+    origin: string | undefined;
+    text: string;
+    title?: string;
+    url?: string;
+    back?: string;
+  },
+  currentHostname = "",
+): string | undefined {
+  const origin = safeSuiteOrigin(input.origin, currentHostname);
+  const spec = HANDOFF_TARGET_SPECS[target];
+  const cleanTitle = input.title
+    ? cleanText(input.title.replace(/[\r\n\t]/g, " "), SUITE_LIMITS.handoffTitle).text
+    : "";
+  const rawBody = cleanText(input.text, SUITE_LIMITS.handoffText).text;
+  if (!origin || !rawBody) return undefined;
+
+  const finalBody =
+    !spec.allowTitle && cleanTitle && !rawBody.startsWith(cleanTitle)
+      ? cleanText(`${cleanTitle} — ${rawBody}`, SUITE_LIMITS.handoffText).text
+      : rawBody;
+  if (!finalBody) return undefined;
+
+  const params = new URLSearchParams({
+    [spec.textKey]: finalBody,
+    from: "campaign",
+  });
+  if (spec.allowTitle && cleanTitle) {
+    params.set("title", cleanTitle);
+  }
+  if (target === "reader") {
+    const safeUrl = safePublicHttpUrl(input.url);
+    if (safeUrl) params.set("url", safeUrl);
+  }
+  if (input.back && allowedSuiteRoute("campaign", input.back, SUITE_LIMITS.back)) {
+    params.set("back", input.back);
+  }
+  return `${origin}/#${spec.route}?${params.toString()}`;
+}
+
 export function explainDraftHref(
   explainOrigin: string | undefined,
   input: { text: string; title?: string; back?: string },
   currentHostname = "",
 ): string | undefined {
-  const origin = safeSuiteOrigin(explainOrigin, currentHostname);
-  const body = cleanText(input.text, SUITE_LIMITS.handoffText);
-  if (!origin || !body.text) return undefined;
-  const params = new URLSearchParams({ text: body.text, from: "campaign" });
-  if (input.title) {
-    const cleanTitle = cleanText(input.title.replace(/[\r\n\t]/g, " "), SUITE_LIMITS.handoffTitle);
-    if (cleanTitle.text) params.set("title", cleanTitle.text);
-  }
-  if (input.back && allowedSuiteRoute("campaign", input.back, SUITE_LIMITS.back)) {
-    params.set("back", input.back);
-  }
-  return `${origin}/#/explain?${params.toString()}`;
+  return suiteHandoffUrl("explain", { origin: explainOrigin, ...input }, currentHostname);
 }
 
 export function personalTaskHref(
@@ -219,14 +272,7 @@ export function personalTaskHref(
   back?: string,
   currentHostname = "",
 ): string | undefined {
-  const origin = safeSuiteOrigin(personalOrigin, currentHostname);
-  const body = cleanText(draftText, SUITE_LIMITS.handoffText);
-  if (!origin || !body.text) return undefined;
-  const params = new URLSearchParams({ draft: body.text, from: "campaign" });
-  if (back && allowedSuiteRoute("campaign", back, SUITE_LIMITS.back)) {
-    params.set("back", back);
-  }
-  return `${origin}/#/tasks?${params.toString()}`;
+  return suiteHandoffUrl("personal", { origin: personalOrigin, text: draftText, back }, currentHostname);
 }
 
 export function prDraftHref(
@@ -234,16 +280,9 @@ export function prDraftHref(
   input: { draft: string; title?: string; back?: string },
   currentHostname = "",
 ): string | undefined {
-  const origin = safeSuiteOrigin(prOrigin, currentHostname);
-  const body = cleanText(input.draft, SUITE_LIMITS.handoffText);
-  if (!origin || !body.text) return undefined;
-  const params = new URLSearchParams({ draft: body.text, from: "campaign" });
-  if (input.title) {
-    const cleanTitle = cleanText(input.title.replace(/[\r\n\t]/g, " "), SUITE_LIMITS.handoffTitle);
-    if (cleanTitle.text) params.set("title", cleanTitle.text);
-  }
-  if (input.back && allowedSuiteRoute("campaign", input.back, SUITE_LIMITS.back)) {
-    params.set("back", input.back);
-  }
-  return `${origin}/#/discover?${params.toString()}`;
+  return suiteHandoffUrl(
+    "pr",
+    { origin: prOrigin, text: input.draft, title: input.title, back: input.back },
+    currentHostname,
+  );
 }

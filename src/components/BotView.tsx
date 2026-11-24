@@ -23,6 +23,11 @@ import {
 } from "../../shared/types";
 import { computeCampaignMetrics } from "../../shared/sheets";
 import { apiWrite } from "../lib/api";
+import {
+  PROVIDER_MODEL_PRESETS,
+  resolveModelOnProviderSwitch,
+  stripEffortSuffix,
+} from "../lib/uiPrefs";
 
 const PROVIDER_LABELS: Record<AiProvider, string> = {
   builtin: "內建規則引擎（免金鑰・即時回應）",
@@ -38,30 +43,6 @@ const PROVIDER_SHORT: Record<AiProvider, string> = {
   claude: "Claude CLI",
   antigravity: "Antigravity CLI",
   api: "外部 API",
-};
-
-const PROVIDER_MODEL_PRESETS: Record<Exclude<AiProvider, "builtin">, Array<{ id: string; label: string }>> = {
-  antigravity: [
-    { id: "gemini-4-hydrogen", label: "Hydrogen · 旗艦" },
-    { id: "gemini-4-carbon", label: "Carbon · 均衡" },
-    { id: "gemini-3.8-flash", label: "3.8 Flash · 極速" },
-    { id: "claude-sonnet-5-5", label: "Sonnet 5.5" },
-    { id: "claude-opus-5-5", label: "Opus 5.5" },
-  ],
-  claude: [
-    { id: "claude-sonnet-5-5", label: "Sonnet 5.5 · 均衡" },
-    { id: "claude-opus-5-5", label: "Opus 5.5 · 旗艦" },
-    { id: "claude-haiku-4-5", label: "Haiku 4.5 · 極速" },
-  ],
-  codex: [
-    { id: "gpt-5.2-codex", label: "GPT-5.2 Codex" },
-    { id: "o4-mini", label: "o4-mini" },
-  ],
-  api: [
-    { id: "gpt-4.1", label: "GPT-4.1" },
-    { id: "gpt-4.1-mini", label: "GPT-4.1 Mini" },
-    { id: "o4-mini", label: "o4-mini" },
-  ],
 };
 
 const DEPTH_META: Record<
@@ -606,7 +587,16 @@ export default function BotView({
               id="bot-provider-select"
               className="select"
               value={snapshot.settings.provider}
-              onChange={(e) => void updateProvider({ provider: e.target.value as AiProvider })}
+              onChange={(e) => {
+                const nextProvider = e.target.value as AiProvider;
+                const nextModel = resolveModelOnProviderSwitch(snapshot.settings.model, nextProvider);
+                setModelDraft(nextModel);
+                void updateProvider(
+                  nextModel !== snapshot.settings.model
+                    ? { provider: nextProvider, model: nextModel }
+                    : { provider: nextProvider },
+                );
+              }}
             >
               {AI_PROVIDERS.map((p) => (
                 <option key={p} value={p}>
@@ -622,7 +612,7 @@ export default function BotView({
               <>
                 <div className="model-chip-row" aria-label="推薦模型快速切換">
                   {PROVIDER_MODEL_PRESETS[snapshot.settings.provider].map((preset) => {
-                    const cleanCurrent = snapshot.settings.model.replace(/-(low|medium|high|xhigh|max)$/i, "");
+                    const cleanCurrent = stripEffortSuffix(snapshot.settings.model);
                     const isSelected = cleanCurrent === preset.id;
                     return (
                       <button
@@ -639,21 +629,42 @@ export default function BotView({
                     );
                   })}
                 </div>
-                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                <form
+                  style={{ display: "flex", gap: 6, marginTop: 4 }}
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const trimmed = modelDraft.trim();
+                    setModelDraft(trimmed);
+                    void updateProvider({ model: trimmed });
+                  }}
+                >
                   <input
                     className="input"
+                    aria-label="自訂模型 ID"
                     placeholder="或輸入自訂模型 ID（留空用預設）"
                     value={modelDraft}
                     onChange={(e) => setModelDraft(e.target.value)}
                   />
                   <button
-                    type="button"
+                    type="submit"
                     className="btn"
-                    onClick={() => void updateProvider({ model: modelDraft })}
+                    disabled={modelDraft.trim() === snapshot.settings.model}
                   >
                     儲存
                   </button>
-                </div>
+                  {snapshot.settings.model && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => {
+                        setModelDraft("");
+                        void updateProvider({ model: "" });
+                      }}
+                    >
+                      恢復預設
+                    </button>
+                  )}
+                </form>
               </>
             )}
           </div>
